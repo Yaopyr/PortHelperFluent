@@ -100,6 +100,18 @@ def test_parse_hex_names_offending_character() -> None:
         parse_hex("0x0G")
 
 
+def test_parse_hex_rejects_adjacent_0x_fragments_but_accepts_separated() -> None:
+    """`0x` 片段不能直接拼接（第二个前缀的 0 会被并入数字），分隔书写才允许。"""
+    with pytest.raises(ValueError):
+        parse_hex("0x010x02")
+    with pytest.raises(ValueError):
+        parse_hex("0x01020x03")
+
+    assert parse_hex(r"\x01\x02") == b"\x01\x02"
+    assert parse_hex("0x01 0x02") == b"\x01\x02"
+    assert parse_hex("0x01\\x02") == b"\x01\x02"
+
+
 def test_decode_bytes_gbk() -> None:
     assert decode_bytes(b"\xc4\xe3", "gbk") == "你"
 

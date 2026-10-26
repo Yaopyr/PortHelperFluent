@@ -97,6 +97,8 @@ class Settings:
         except BaseException:
             temp_path.unlink(missing_ok=True)
             raise
+        # 保存成功后配置文件已经有效，上一次 load 的损坏/只读警告不再成立。
+        self._warning = None
 
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
@@ -109,6 +111,7 @@ class Settings:
 
     def reset(self) -> None:
         self._data = copy.deepcopy(DEFAULT_SETTINGS)
+        self._warning = None
 
     def as_dict(self) -> dict[str, Any]:
         return copy.deepcopy(self._data)

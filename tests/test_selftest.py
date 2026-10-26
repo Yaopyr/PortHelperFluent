@@ -156,6 +156,44 @@ def test_selftest_fails_on_read_only_config(tmp_path: Path, monkeypatch) -> None
     assert config.read_text(encoding="utf-8") == '{"ui.theme": "dark"}\n'
 
 
+def test_selftest_keeps_writable_files_and_leaves_no_probe_leftovers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """可写的 app.log/config.json 在自检前后内容与 mtime 不变，且不留探测残留。"""
+    import main
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    paths.data_dir.mkdir(parents=True)
+    paths.log_dir.mkdir()
+    app_log = paths.log_dir / "app.log"
+    config = paths.config_file
+    app_log.write_text("旧日志内容\n", encoding="utf-8")
+    config.write_text('{"ui.theme": "dark"}\n', encoding="utf-8")
+    untouched = {
+        app_log: ("旧日志内容\n", app_log.stat().st_mtime_ns),
+        config: ('{"ui.theme": "dark"}\n', config.stat().st_mtime_ns),
+    }
+    report_path = tmp_path / "reports" / "selftest.json"
+    monkeypatch.setattr(main, "resolve_paths", lambda: paths)
+    monkeypatch.setattr(main, "ensure_writable_paths", lambda p: (p, None))
+
+    exit_code = main.run_selftest(report_path)
+
+    assert exit_code == 0
+    assert json.loads(report_path.read_text(encoding="utf-8"))["ok"] is True
+    for path, (text, mtime_ns) in untouched.items():
+        assert path.read_text(encoding="utf-8") == text
+        assert path.stat().st_mtime_ns == mtime_ns
+    # 目录探针与报告原子写入都不能留下 .probe/.tmp 文件。
+    leftovers = [
+        path
+        for path in list(paths.data_dir.rglob("*")) + list(tmp_path.rglob("*.tmp"))
+        if path.is_file() and path.suffix in (".probe", ".tmp")
+    ]
+    assert leftovers == []
+
+
 def test_selftest_cli_detects_read_only_app_log(tmp_path: Path) -> None:
     """子进程完整链路：真实 APPDATA 指向临时目录，只读 app.log 必须让自检失败。"""
     appdata = tmp_path / "appdata"
@@ -266,7 +304,7 @@ def test_run_gui_reports_binding_failure_without_generic_startup_handler(
 
 
 def test_handle_startup_failure_writes_chinese_report_and_notifies(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, qapp
 ) -> None:
     import main
     from app.core.logging_setup import setup_logging
@@ -392,7 +430,7 @@ def test_startup_failure_uses_effective_appdata_fallback_paths(
 
 
 def test_logging_setup_failure_keeps_effective_appdata_fallback_paths(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, qapp
 ) -> None:
     """回退到 AppData 后日志初始化失败时，仍用生效路径写崩溃报告。"""
     import main
@@ -451,7 +489,7 @@ def test_logging_setup_failure_keeps_effective_appdata_fallback_paths(
     assert list(tmp_path.rglob("crash-*.txt")) == reports
 
 
-def test_main_routes_gui_error_to_startup_handler(tmp_path: Path, monkeypatch) -> None:
+def test_main_routes_gui_error_to_startup_handler(tmp_path: Path, monkeypatch, qapp) -> None:
     """main() 的真实分发路径：_run_gui 抛错时交给启动失败处理并返回 1。"""
     import main
     from app.services.paths import resolve_paths
@@ -617,6 +655,88 @@ def test_startup_failure_falls_back_to_native_when_qt_dialog_fails(
 
     assert len(native) == 1
     assert "模拟启动失败" in native[0]
+
+
+class _FakeUser32:
+    """替代 ctypes.WinDLL("user32")，记录 MessageBoxW 的调用与返回值。"""
+
+    def __init__(self, result: int) -> None:
+        self.result = result
+        self.calls: list[tuple[object, str, str, int]] = []
+
+    def MessageBoxW(self, hwnd: object, text: str, caption: str, flags: int) -> int:
+        self.calls.append((hwnd, text, caption, flags))
+        return self.result
+
+
+def test_native_error_logs_win32_error_when_messagebox_returns_zero(monkeypatch) -> None:
+    """MessageBoxW 返回 0 表示对话框没显示：记录 Win32 错误码，但不抛出异常。"""
+    import ctypes
+
+    import main
+
+    messages: list[str] = []
+    fake_user32 = _FakeUser32(0)
+    monkeypatch.setattr(main, "_log_safely", lambda level, message: messages.append(message))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: fake_user32)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    monkeypatch.setattr(ctypes, "FormatError", lambda code: "拒绝访问", raising=False)
+
+    main._show_native_error("模拟系统提示")
+
+    assert fake_user32.calls and fake_user32.calls[0][1] == "模拟系统提示"
+    assert len(messages) == 1
+    assert "Win32" in messages[0]
+    assert "5" in messages[0]
+    assert "拒绝访问" in messages[0]
+    assert "模拟系统提示" in messages[0]
+
+
+def test_native_error_is_silent_when_messagebox_succeeds(monkeypatch) -> None:
+    import ctypes
+
+    import main
+
+    messages: list[str] = []
+    fake_user32 = _FakeUser32(1)
+    monkeypatch.setattr(main, "_log_safely", lambda level, message: messages.append(message))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: fake_user32)
+
+    main._show_native_error("正常显示")
+
+    assert fake_user32.calls and fake_user32.calls[0][2] == main.APP_TITLE
+    assert messages == []
+
+
+def test_no_dialogs_env_suppresses_runtime_error_and_warning_dialogs(
+    monkeypatch, qapp
+) -> None:
+    """PORTHELPER_NO_DIALOGS 也约束运行期提示：异常桥接不得弹框阻塞 GUI 线程。"""
+    import main
+    from PyQt6.QtWidgets import QMessageBox
+
+    shown: list[str] = []
+    monkeypatch.setenv(main.NO_DIALOGS_ENV, "1")
+    monkeypatch.setattr(
+        QMessageBox, "critical", staticmethod(lambda *args, **kwargs: shown.append("critical"))
+    )
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *args, **kwargs: shown.append("warning"))
+    )
+
+    on_error = main._create_error_callback()
+    assert on_error is not None
+    on_error("模拟运行时异常")
+    qapp.processEvents()
+    main._show_error_dialog("模拟错误提示")
+    main._show_warning_dialog("模拟提示")
+
+    assert shown == []
+
+    # 正对照：去掉环境变量后提示框确实会被调用，证明上面的断言不是补丁失效。
+    monkeypatch.delenv(main.NO_DIALOGS_ENV)
+    main._show_warning_dialog("提示框可用")
+    assert shown == ["warning"]
 
 
 def test_startup_failure_respects_no_dialogs_env(

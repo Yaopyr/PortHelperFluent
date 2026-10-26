@@ -27,7 +27,7 @@ from app.core.logging_setup import (
 )
 from app.core.settings import DEFAULT_SETTINGS, Settings
 from app.services.exports import write_text_atomic
-from app.services.paths import AppPaths, ensure_writable_paths, resolve_paths
+from app.services.paths import AppPaths, ensure_writable_paths, probe_write, resolve_paths
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QWidget
@@ -155,7 +155,8 @@ def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> Non
         if portable_warning:
             _log_safely(logging.WARNING, portable_warning)
     except Exception as exc:
-        errors.append(f"数据目录不可写：{exc}")
+        # 这里既可能是目录不可写，也可能是 app.log/config.json 只读，不能只报目录。
+        errors.append(f"数据目录或文件不可写：{exc}")
 
     if paths is not None:
         _check_selftest_writable(paths, errors)
@@ -263,6 +264,12 @@ def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Lo
     if settings.warning:
         logger.warning(settings.warning)
 
+    # 先安装 Qt 消息处理器：它不依赖 QApplication 实例，因此可以捕获平台插件在
+    # QApplication 构造期间输出的告警（例如插件加载失败、缩放策略问题）。
+    from app.ui.qt_utils import install_qt_message_handler
+
+    install_qt_message_handler(logger)
+
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import QApplication
@@ -271,10 +278,6 @@ def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Lo
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication.instance() or QApplication(sys.argv)
-    # 立刻把 Qt 自身的消息接入统一日志（含文件/行号/函数名），便于排查白屏等问题。
-    from app.ui.qt_utils import install_qt_message_handler
-
-    install_qt_message_handler(logger)
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_TITLE)
@@ -342,11 +345,14 @@ def _dialogs_enabled() -> bool:
 
 
 def _show_error_dialog(message: str) -> None:
-    """显示 Qt 错误提示框；没有 QApplication 时直接返回（调用方负责兜底）。
+    """显示 Qt 错误提示框；没有 QApplication 或禁用对话框时直接返回。
 
     该函数也作为异常桥接的排队槽使用，因此不能抛异常：是否退回系统对话框由
-    `_notify_startup_failure` 在调用前判断。
+    `_notify_startup_failure` 在调用前判断；`PORTHELPER_NO_DIALOGS` 同时约束
+    运行期异常提示，避免无界面环境被子线程异常弹框阻塞。
     """
+    if not _dialogs_enabled():
+        return
     from PyQt6.QtWidgets import QApplication, QMessageBox
 
     if QApplication.instance() is None:
@@ -359,11 +365,23 @@ def _show_native_error(message: str) -> None:
 
     依赖缺失、QApplication 创建失败等早期错误发生在 Qt 可用之前，只能走系统
     对话框；失败（例如非 Windows）只记录日志，绝不静默丢弃也不抛出。
+    MessageBoxW 返回 0 表示对话框没能显示，此时记录 Win32 错误码便于排查。
     """
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, APP_TITLE, 0x10)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        result = user32.MessageBoxW(None, message, APP_TITLE, 0x10)
+        if result == 0:
+            error_code = ctypes.get_last_error()
+            try:
+                detail = ctypes.FormatError(error_code)
+            except Exception:
+                detail = "未知错误"
+            _log_safely(
+                logging.ERROR,
+                f"系统错误对话框未能显示（Win32 错误 {error_code}：{detail}）：{message}",
+            )
     except Exception:
         try:
             get_logger().exception("显示系统错误对话框失败，错误信息：%s", message)
@@ -397,6 +415,8 @@ def _notify_startup_failure(message: str) -> None:
 
 
 def _show_warning_dialog(message: str) -> None:
+    if not _dialogs_enabled():
+        return
     from PyQt6.QtWidgets import QApplication, QMessageBox
 
     if QApplication.instance() is None:
@@ -492,9 +512,8 @@ def _startup_failure_hint(exc: BaseException) -> str:
 
 
 def _check_writable(directory: Path) -> None:
-    fd, name = tempfile.mkstemp(prefix="selftest-", suffix=".tmp", dir=directory)
-    os.close(fd)
-    Path(name).unlink(missing_ok=True)
+    """复用路径模块的探针：写一个字节并在 finally 中清理，不留下 .probe 残留。"""
+    probe_write(directory)
 
 
 def _probe(loader: Callable[[], str], errors: list[str], label: str) -> str:

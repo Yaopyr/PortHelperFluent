@@ -115,6 +115,30 @@ def test_reset_restores_defaults(config_path: Path) -> None:
     assert settings.get("custom.key") is None
 
 
+def test_save_clears_warning_after_corrupt_load(config_path: Path) -> None:
+    config_path.write_text("{ broken", encoding="utf-8")
+    settings = Settings(config_path)
+    settings.load()
+    assert settings.warning is not None
+
+    settings.save()
+
+    assert settings.warning is None
+    assert json.loads(config_path.read_text(encoding="utf-8"))["serial.baud"] == 115200
+
+
+def test_reset_clears_warning_after_corrupt_load(config_path: Path) -> None:
+    config_path.write_text("{ broken", encoding="utf-8")
+    settings = Settings(config_path)
+    settings.load()
+    assert settings.warning is not None
+
+    settings.reset()
+
+    assert settings.warning is None
+    assert settings.as_dict() == DEFAULT_SETTINGS
+
+
 def test_save_writes_readable_utf8_json(config_path: Path) -> None:
     settings = Settings(config_path)
     settings.load()

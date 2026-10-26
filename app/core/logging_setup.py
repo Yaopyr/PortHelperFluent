@@ -81,8 +81,9 @@ def install_exception_hooks(
 ) -> None:
     """安装主线程与子线程异常钩子：写崩溃报告、写日志并通知界面。
 
-    主线程的 KeyboardInterrupt 与子线程的 SystemExit 保持默认行为，不写崩溃报告，
-    避免把用户主动中断或正常退出误报为崩溃。
+    主线程的 KeyboardInterrupt 与子线程的 SystemExit 被直接忽略：既不写崩溃
+    报告，也不弹框，也不会回落到默认钩子打印 traceback，避免把用户主动中断或
+    正常退出误报为崩溃。
     """
     log_dir = Path(log_dir)
     logger = get_logger()
@@ -126,11 +127,13 @@ def install_exception_hooks(
         tb: TracebackType | None,
     ) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
+            # 静默忽略用户中断：不写报告、不弹框、不回落默认钩子。
             return
         report(exc_type, exc, tb)
 
     def thread_hook(args: threading.ExceptHookArgs) -> None:
         if issubclass(args.exc_type, SystemExit):
+            # 子线程正常退出不是崩溃，同样静默忽略。
             return
         report(args.exc_type, args.exc_value, args.exc_traceback)
 

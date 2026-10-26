@@ -21,6 +21,15 @@ def isolated_appdata(tmp_path, monkeypatch):
     return appdata
 
 
+@pytest.fixture(autouse=True)
+def reset_qt_message_handler():
+    """测试可能安装全局 Qt 消息处理器；结束后必须卸载，避免污染后续测试。"""
+    yield
+    from app.ui.qt_utils import uninstall_qt_message_handler
+
+    uninstall_qt_message_handler()
+
+
 @pytest.fixture(scope="session")
 def qapp():
     from PyQt6.QtWidgets import QApplication

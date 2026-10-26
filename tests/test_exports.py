@@ -75,6 +75,22 @@ def test_sanitize_name_does_not_treat_similar_names_as_reserved() -> None:
     assert sanitize_name("COM10") == "COM10"
     assert sanitize_name("LPT0") == "LPT0"
     assert sanitize_name("CONSOLE") == "CONSOLE"
+    assert sanitize_name("CONIN") == "CONIN"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("CONIN$", "_CONIN$"),
+        ("conout$", "_conout$"),
+        ("CLOCK$", "_CLOCK$"),
+        ("CONIN$.txt", "_CONIN$.txt"),
+        ("clock$.json", "_clock$.json"),
+    ],
+)
+def test_sanitize_name_prefixes_console_device_names(name: str, expected: str) -> None:
+    """CONIN$/CONOUT$/CLOCK$ 同样是 Windows 保留设备名，大小写与扩展名都适用。"""
+    assert sanitize_name(name) == expected
 
 
 def test_sanitize_name_never_returns_empty_result() -> None:

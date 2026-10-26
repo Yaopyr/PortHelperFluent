@@ -169,27 +169,31 @@ def test_install_exception_hooks_handles_thread_exceptions(tmp_path: Path) -> No
         threading.excepthook = old_thread_hook
 
 
-def test_install_exception_hooks_keeps_keyboard_interrupt(tmp_path: Path) -> None:
+def test_install_exception_hooks_ignores_keyboard_interrupt(tmp_path: Path) -> None:
+    """KeyboardInterrupt 被静默忽略：不写报告、不通知界面、不回落默认钩子。"""
+    messages: list[str] = []
     old_hook = sys.excepthook
     old_thread_hook = threading.excepthook
     try:
         setup_logging(tmp_path / "logs")
-        install_exception_hooks(tmp_path / "logs")
+        install_exception_hooks(tmp_path / "logs", on_error=messages.append)
 
         sys.excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
 
         assert list((tmp_path / "logs").glob("crash-*.txt")) == []
+        assert messages == []
     finally:
         sys.excepthook = old_hook
         threading.excepthook = old_thread_hook
 
 
-def test_install_exception_hooks_keeps_thread_system_exit(tmp_path: Path) -> None:
+def test_install_exception_hooks_ignores_thread_system_exit(tmp_path: Path) -> None:
+    messages: list[str] = []
     old_hook = sys.excepthook
     old_thread_hook = threading.excepthook
     try:
         setup_logging(tmp_path / "logs")
-        install_exception_hooks(tmp_path / "logs")
+        install_exception_hooks(tmp_path / "logs", on_error=messages.append)
 
         args = threading.ExceptHookArgs(
             (SystemExit, SystemExit(0), None, threading.current_thread())
@@ -197,6 +201,7 @@ def test_install_exception_hooks_keeps_thread_system_exit(tmp_path: Path) -> Non
         threading.excepthook(args)
 
         assert list((tmp_path / "logs").glob("crash-*.txt")) == []
+        assert messages == []
     finally:
         sys.excepthook = old_hook
         threading.excepthook = old_thread_hook

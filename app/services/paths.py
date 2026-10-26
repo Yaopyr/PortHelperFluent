@@ -89,8 +89,8 @@ def ensure_writable_paths(
     """
     try:
         ensure_dirs(paths)
-        _probe_write(paths.data_dir)
-        _probe_write(paths.log_dir)
+        probe_write(paths.data_dir)
+        probe_write(paths.log_dir)
         _probe_existing_files(paths)
     except OSError as exc:
         if not paths.portable:
@@ -98,8 +98,8 @@ def ensure_writable_paths(
         fallback = _appdata_paths(paths.exe_dir, appdata)
         try:
             ensure_dirs(fallback)
-            _probe_write(fallback.data_dir)
-            _probe_write(fallback.log_dir)
+            probe_write(fallback.data_dir)
+            probe_write(fallback.log_dir)
             _probe_existing_files(fallback)
         except OSError as fallback_exc:
             raise OSError(
@@ -115,11 +115,12 @@ def ensure_writable_paths(
     return paths, None
 
 
-def _probe_write(directory: Path) -> None:
+def probe_write(directory: Path) -> None:
     """在目录内写入一个带 PID 的临时探针文件并删除，确认目录真实可写。
 
     仅靠 `mkdir(exist_ok=True)` 无法发现“目录已存在但只读”的情况，因此必须实际
-    写一次文件。无论成功与否都在 `finally` 中清理，不留下残留文件。
+    写一次文件。无论成功与否都在 `finally` 中清理，不留下残留文件。该探针也供
+    `main.run_selftest` 复用，避免自检另写一份容易泄漏临时文件的实现。
     """
     probe = directory / f".porthelper-write-probe-{os.getpid()}.probe"
     try:

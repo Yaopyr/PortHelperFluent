@@ -9,9 +9,10 @@ from pathlib import Path
 _FORBIDDEN_CHARS = frozenset('<>:"/\\|?*')
 _MAX_NAME_LENGTH = 120
 _FALLBACK_NAME = "data"
-# Windows 设备名（CON、NUL、COM1-LPT9 等）即使带扩展名也不能用作文件名。
+# Windows 设备名（CON、NUL、COM1-LPT9 与 CONIN$/CONOUT$/CLOCK$ 等）即使带扩展名
+# 也不能用作文件名。
 _RESERVED_NAMES = frozenset(
-    ("CON", "PRN", "AUX", "NUL")
+    ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$")
     + tuple(f"COM{index}" for index in range(1, 10))
     + tuple(f"LPT{index}" for index in range(1, 10))
 )
