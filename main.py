@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from app.core.logging_setup import (
+    LOG_FILE_NAME,
     get_logger,
     install_exception_hooks,
     setup_logging,
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
 APP_TITLE = "PortHelper Fluent"
 APP_VERSION = str(DEFAULT_SETTINGS["app.version"])
 BINDING_FAILURE_HINT = "qfluentwidgets 当前不是 PyQt6 版本"
+# 置为 1 时只写日志、不弹任何模态框，供无界面测试/子进程使用。
+NO_DIALOGS_ENV = "PORTHELPER_NO_DIALOGS"
 REQUIRED_MODULES = (
     "PyQt6",
     "qfluentwidgets",
@@ -100,9 +103,41 @@ def create_main_window(settings: Settings) -> "QWidget":
 
 
 def run_selftest(report_path: Path | None = None) -> int:
-    """检查依赖、Qt 绑定与数据目录可写性，并写出 JSON 报告。返回进程退出码。"""
-    errors: list[str] = []
+    """检查依赖、Qt 绑定与数据目录/日志/配置可写性，并写出 JSON 报告。返回进程退出码。
 
+    自检必须在“程序其实起不来”时也报错：除了新建临时探针，还要真正初始化日志并
+    打开已有的 `app.log`、`config.json` 验证文件级写入权限（只读文件同样会让正式
+    启动失败）。任何一步出现异常都收敛成 `errors`，报告始终尝试写出，绝不把
+    traceback 抛给窗口化 exe。
+    """
+    errors: list[str] = []
+    versions = {"qt": "", "qfluentwidgets": ""}
+    try:
+        _collect_selftest_errors(errors, versions)
+    except Exception as exc:  # 自检自身出错也必须给出可读报告
+        errors.append(f"自检过程中出现未预期的错误：{exc!r}")
+
+    report = {
+        "ok": not errors,
+        "errors": errors,
+        "python": platform.python_version(),
+        "qt": versions["qt"],
+        "qfluentwidgets": versions["qfluentwidgets"],
+        "version": APP_VERSION,
+    }
+
+    exit_code = 0 if not errors else 1
+    if report_path is not None:
+        try:
+            write_text_atomic(Path(report_path), json.dumps(report, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            # 报告写不出去本身就是自检失败；只记日志，不抛出 traceback。
+            exit_code = 1
+            _report_selftest_write_failure(exc)
+    return exit_code
+
+
+def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> None:
     for module_name in REQUIRED_MODULES:
         try:
             importlib.import_module(module_name)
@@ -114,34 +149,73 @@ def run_selftest(report_path: Path | None = None) -> int:
     except Exception as exc:
         errors.append(f"Qt 绑定自检失败：{exc}")
 
+    paths: AppPaths | None = None
     try:
         paths, portable_warning = ensure_writable_paths(resolve_paths())
         if portable_warning:
-            get_logger().warning(portable_warning)
-        _check_writable(paths.data_dir)
-        _check_writable(paths.log_dir)
+            _log_safely(logging.WARNING, portable_warning)
     except Exception as exc:
         errors.append(f"数据目录不可写：{exc}")
 
-    qt_version = _probe(_qt_version, errors, "PyQt6")
-    qfluentwidgets_version = _probe(_qfluentwidgets_version, errors, "PyQt6-Fluent-Widgets")
-    report = {
-        "ok": not errors,
-        "errors": errors,
-        "python": platform.python_version(),
-        "qt": qt_version,
-        "qfluentwidgets": qfluentwidgets_version,
-        "version": APP_VERSION,
-    }
+    if paths is not None:
+        _check_selftest_writable(paths, errors)
 
-    exit_code = 0 if not errors else 1
-    if report_path is not None:
+    versions["qt"] = _probe(_qt_version, errors, "PyQt6")
+    versions["qfluentwidgets"] = _probe(_qfluentwidgets_version, errors, "PyQt6-Fluent-Widgets")
+
+
+def _check_selftest_writable(paths: AppPaths, errors: list[str]) -> None:
+    """探测真实目录与真实文件的可写性：临时探针通过不代表 app.log 能写。"""
+    try:
+        _check_writable(paths.data_dir)
+        _check_writable(paths.log_dir)
+    except OSError as exc:
+        errors.append(f"数据目录不可写：{exc}")
+        return
+
+    app_log = paths.log_dir / LOG_FILE_NAME
+    try:
+        # 用真实日志目录初始化一次：只读的 app.log 会在这里抛出 PermissionError。
+        setup_logging(paths.log_dir)
+    except Exception as exc:
+        errors.append(f"日志文件不可写（{app_log}）：{exc}")
+    else:
         try:
-            write_text_atomic(Path(report_path), json.dumps(report, ensure_ascii=False, indent=2))
+            _probe_existing_file(app_log, "ab")
         except OSError as exc:
-            get_logger().error("写入自检报告失败：%s", exc)
-            exit_code = 1
-    return exit_code
+            errors.append(f"日志文件不可写（{app_log}）：{exc}")
+
+    if paths.config_file.exists():
+        try:
+            _probe_existing_file(paths.config_file, "r+b")
+        except OSError as exc:
+            errors.append(f"配置文件不可写（{paths.config_file}）：{exc}")
+
+
+def _probe_existing_file(path: Path, mode: str) -> None:
+    """以追加/更新方式打开文件后立即关闭，不写入、不截断、不破坏内容。"""
+    with path.open(mode):
+        pass
+
+
+def _report_selftest_write_failure(exc: BaseException) -> None:
+    """报告写不出去时记录错误：日志可用就写日志，否则退回 stderr。"""
+    message = f"写入自检报告失败：{exc}"
+    _log_safely(logging.ERROR, message)
+    stream = sys.stderr
+    if stream is None:  # 窗口化 exe 的 stderr 可能不可用
+        return
+    try:
+        print(message, file=stream)
+    except Exception:
+        pass
+
+
+def _log_safely(level: int, message: str) -> None:
+    try:
+        get_logger().log(level, message)
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,6 +271,10 @@ def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Lo
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication.instance() or QApplication(sys.argv)
+    # 立刻把 Qt 自身的消息接入统一日志（含文件/行号/函数名），便于排查白屏等问题。
+    from app.ui.qt_utils import install_qt_message_handler
+
+    install_qt_message_handler(logger)
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_TITLE)
@@ -215,7 +293,7 @@ def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Lo
 
     window = create_main_window(settings)
     window.show()
-    if portable_warning:
+    if portable_warning and _dialogs_enabled():
         _show_warning_dialog(portable_warning)
     logger.info("%s %s 已启动，数据目录：%s", APP_TITLE, APP_VERSION, paths.data_dir)
     return app.exec()
@@ -253,19 +331,69 @@ def _handle_binding_failure(exc: BaseException, log_dir: Path) -> int:
         pass
     if report_path is not None:
         message += f"\n\n崩溃报告已保存到：{report_path}"
-    try:
-        _show_error_dialog(message)
-    except Exception:
-        pass
+    _notify_startup_failure(message)
     return 1
 
 
+def _dialogs_enabled() -> bool:
+    """`PORTHELPER_NO_DIALOGS=1` 时禁用所有启动期模态框，只写日志。"""
+    value = os.environ.get(NO_DIALOGS_ENV, "").strip().lower()
+    return value not in ("1", "true", "yes", "on")
+
+
 def _show_error_dialog(message: str) -> None:
+    """显示 Qt 错误提示框；没有 QApplication 时直接返回（调用方负责兜底）。
+
+    该函数也作为异常桥接的排队槽使用，因此不能抛异常：是否退回系统对话框由
+    `_notify_startup_failure` 在调用前判断。
+    """
     from PyQt6.QtWidgets import QApplication, QMessageBox
 
     if QApplication.instance() is None:
         return
     QMessageBox.critical(None, "PortHelper Fluent 错误", message)
+
+
+def _show_native_error(message: str) -> None:
+    """无 QApplication 时的兜底提示：Win32 MessageBoxW，窗口化 exe 也能看见。
+
+    依赖缺失、QApplication 创建失败等早期错误发生在 Qt 可用之前，只能走系统
+    对话框；失败（例如非 Windows）只记录日志，绝不静默丢弃也不抛出。
+    """
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, APP_TITLE, 0x10)
+    except Exception:
+        try:
+            get_logger().exception("显示系统错误对话框失败，错误信息：%s", message)
+        except Exception:
+            pass
+
+
+def _notify_startup_failure(message: str) -> None:
+    """尽力让启动错误可见：Qt 对话框 -> 系统对话框；禁用对话框时只写日志。"""
+    if not _dialogs_enabled():
+        _log_safely(logging.ERROR, f"已设置 {NO_DIALOGS_ENV}，跳过弹框，仅记录日志：{message}")
+        return
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception:
+        # PyQt6 缺失：Qt 对话框根本不可用，直接走系统对话框。
+        _show_native_error(message)
+        return
+    if QApplication.instance() is None:
+        # 早期失败（例如 QApplication 创建前）没有事件循环，只能走系统对话框。
+        _show_native_error(message)
+        return
+    try:
+        _show_error_dialog(message)
+    except Exception:
+        try:
+            get_logger().exception("显示 Qt 错误提示框失败，改用系统对话框")
+        except Exception:
+            pass
+        _show_native_error(message)
 
 
 def _show_warning_dialog(message: str) -> None:
@@ -317,8 +445,15 @@ def _handle_startup_failure(exc: BaseException, paths: AppPaths | None = None) -
 
     `paths` 是启动时实际生效的路径（例如已回退到 AppData 的目录）；只有生效路径
     尚未解析出来时才退回 `resolve_paths()`，避免把报告写进不可写的便携目录。
+    没有 QApplication（窗口化 exe 的最早期失败）时改用系统对话框，绝不静默返回。
     """
-    log_dir = paths.log_dir if paths is not None else resolve_paths().log_dir
+    if paths is not None:
+        log_dir = paths.log_dir
+    else:
+        try:
+            log_dir = resolve_paths().log_dir
+        except Exception:
+            log_dir = Path(tempfile.gettempdir())
     report_path: Path | None = None
     try:
         report_path = write_crash_report(log_dir, type(exc), exc, exc.__traceback__)
@@ -332,11 +467,28 @@ def _handle_startup_failure(exc: BaseException, paths: AppPaths | None = None) -
     message = f"程序启动失败：{exc}"
     if report_path is not None:
         message += f"\n\n崩溃报告已保存到：{report_path}"
-    message += "\n\n请检查依赖是否安装完整，或把崩溃报告提供给维护者。"
-    try:
-        _show_error_dialog(message)
-    except Exception:
-        pass
+    message += f"\n\n{_startup_failure_hint(exc)}"
+    _notify_startup_failure(message)
+
+
+def _startup_failure_hint(exc: BaseException) -> str:
+    """按异常类型给出“可能原因 + 下一步”的中文提示，而不只是笼统的“检查依赖”。"""
+    if isinstance(exc, PermissionError):
+        return (
+            "可能原因：日志或配置文件被设为只读、正被其他程序占用，"
+            "或当前账户没有数据目录的写入权限。\n"
+            "下一步：取消 app.log / config.json 的只读属性并关闭占用它们的程序；"
+            "便携模式请确认 data 目录可写，或删除 portable.flag 改用 %APPDATA%；"
+            "也可以把程序放到有写入权限的目录后重试。"
+        )
+    if isinstance(exc, OSError):
+        # 路径/目录类失败（含本应用抛出的“便携与 AppData 都不可写”）：给出位置与回退指引。
+        return (
+            "可能原因：数据目录不可用（目录被删除、只读磁盘、路径被占用或权限不足）。\n"
+            "下一步：确认数据目录存在且有写权限；便携模式请检查 data 目录，"
+            "必要时删除 portable.flag 回退到 %APPDATA%。"
+        )
+    return "请检查依赖是否安装完整（pip install -r requirements.txt），或把崩溃报告提供给维护者。"
 
 
 def _check_writable(directory: Path) -> None:

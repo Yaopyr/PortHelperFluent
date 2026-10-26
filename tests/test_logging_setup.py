@@ -75,6 +75,60 @@ def test_write_crash_report_contains_traceback(tmp_path: Path) -> None:
     assert "Traceback" in content
 
 
+def test_write_crash_report_never_overwrites_within_same_second(tmp_path: Path) -> None:
+    """同一秒内的第二次崩溃必须拿到新文件名，不能覆盖第一份报告。"""
+    try:
+        raise RuntimeError("第一次崩溃")
+    except RuntimeError:
+        exc_type, exc, tb = sys.exc_info()
+
+    first = write_crash_report(tmp_path / "logs", exc_type, exc, tb)
+    second = write_crash_report(tmp_path / "logs", exc_type, exc, tb)
+
+    assert first != second
+    assert first.is_file()
+    assert second.is_file()
+    assert "第一次崩溃" in first.read_text(encoding="utf-8")
+    assert "第一次崩溃" in second.read_text(encoding="utf-8")
+    assert first.name.startswith("crash-")
+
+
+def test_exception_hook_logs_original_error_before_report_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """写崩溃报告失败时，日志里必须已包含原始异常与 traceback，而不只是写报告失败。"""
+    import app.core.logging_setup as logging_setup
+
+    old_hook = sys.excepthook
+    old_thread_hook = threading.excepthook
+
+    def broken_report(*args, **kwargs):
+        raise OSError("日志目录不可写")
+
+    try:
+        logger = setup_logging(tmp_path / "logs")
+        monkeypatch.setattr(logging_setup, "write_crash_report", broken_report)
+        install_exception_hooks(tmp_path / "logs")
+
+        try:
+            raise RuntimeError("原始异常信息")
+        except RuntimeError:
+            sys.excepthook(*sys.exc_info())
+
+        for handler in logger.handlers:
+            handler.flush()
+
+        content = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+        assert "原始异常信息" in content
+        assert "Traceback" in content
+        assert "写入崩溃报告失败" in content
+        # 原始异常在报告失败之前记录。
+        assert content.index("原始异常信息") < content.index("写入崩溃报告失败")
+    finally:
+        sys.excepthook = old_hook
+        threading.excepthook = old_thread_hook
+
+
 def test_install_exception_hooks_reports_and_notifies(tmp_path: Path) -> None:
     messages: list[str] = []
     old_hook = sys.excepthook

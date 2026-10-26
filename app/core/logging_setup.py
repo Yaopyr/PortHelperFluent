@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import traceback
@@ -50,17 +51,28 @@ def write_crash_report(
     exc: BaseException | None,
     tb: TracebackType | None,
 ) -> Path:
-    """把 traceback 写入 crash-YYYYmmdd-HHMMSS.txt 并返回报告路径。"""
+    """把 traceback 写入 crash-<时间>-<PID>.txt 并返回报告路径。
+
+    文件名带微秒与 PID，同一秒内的第二次崩溃不会覆盖第一次的报告；极端的同
+    微秒碰撞再用 `-1`、`-2` 后缀兜底（以独占方式创建，不存在覆盖窗口）。
+    """
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now()
-    report_path = log_dir / f"crash-{timestamp:%Y%m%d-%H%M%S}.txt"
     detail = "".join(traceback.format_exception(exc_type, exc, tb))
-    report_path.write_text(
-        f"PortHelper Fluent 崩溃报告\n时间：{timestamp:%Y-%m-%d %H:%M:%S}\n\n{detail}",
-        encoding="utf-8",
-    )
-    return report_path
+    content = f"PortHelper Fluent 崩溃报告\n时间：{timestamp:%Y-%m-%d %H:%M:%S}\n\n{detail}"
+    stamp = f"{timestamp:%Y%m%d-%H%M%S}-{timestamp.microsecond:06d}-pid{os.getpid()}"
+    for attempt in range(1000):
+        suffix = f"-{attempt}" if attempt else ""
+        report_path = log_dir / f"crash-{stamp}{suffix}.txt"
+        try:
+            # 独占创建：并发/同微秒的第二次崩溃会自动换名，而不是静默覆盖。
+            with report_path.open("x", encoding="utf-8") as handle:
+                handle.write(content)
+        except FileExistsError:
+            continue
+        return report_path
+    raise OSError(f"无法在 {log_dir} 中创建唯一的崩溃报告文件名")
 
 
 def install_exception_hooks(
@@ -81,16 +93,32 @@ def install_exception_hooks(
         tb: TracebackType | None,
     ) -> None:
         message = f"程序遇到未处理的错误：{exc}"
+        # 先记录原始异常（含 traceback），再尝试写崩溃报告：报告写入失败时
+        # 日志里仍然留有真正的失败原因，而不是只剩“写报告失败”。
+        try:
+            logger.critical(message, exc_info=(exc_type, exc, tb))
+        except Exception:
+            pass
         try:
             report_path = write_crash_report(log_dir, exc_type, exc, tb)
-            logger.critical("%s（崩溃报告：%s）", message, report_path, exc_info=(exc_type, exc, tb))
         except Exception:
-            logger.exception("写入崩溃报告失败")
+            try:
+                logger.exception("写入崩溃报告失败，原始异常已记录在上方")
+            except Exception:
+                pass
+        else:
+            try:
+                logger.critical("崩溃报告已保存到：%s", report_path)
+            except Exception:
+                pass
         if on_error is not None:
             try:
                 on_error(message)
             except Exception:
-                logger.exception("执行异常回调失败")
+                try:
+                    logger.exception("执行异常回调失败")
+                except Exception:
+                    pass
 
     def main_hook(
         exc_type: type[BaseException],

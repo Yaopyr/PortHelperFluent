@@ -1,5 +1,6 @@
 import json
 import os
+import site
 import stat
 import subprocess
 import sys
@@ -27,22 +28,34 @@ def _restore_global_state():
         handler.close()
 
 
-def _selftest_env() -> dict[str, str]:
+def _selftest_env(appdata: Path, **overrides: str) -> dict[str, str]:
+    """子进程环境：APPDATA 指向临时目录，绝不写入真实用户目录。
+
+    APPDATA 同时决定 Python 用户级 site-packages 的位置；本机依赖装在用户目录，
+    因此显式保留 `PYTHONUSERBASE`，否则子进程会“缺依赖”。
+    """
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["APPDATA"] = str(appdata)
+    env["PYTHONUSERBASE"] = site.getuserbase()
+    env.pop("PORTHELPER_NO_DIALOGS", None)
+    env.update(overrides)
     return env
 
 
 def test_selftest_cli_writes_ok_report(tmp_path: Path) -> None:
     report_path = tmp_path / "reports" / "selftest.json"
+    appdata = tmp_path / "appdata"
 
     result = subprocess.run(
         [sys.executable, "main.py", "--selftest", "--report", str(report_path)],
         cwd=REPO_ROOT,
-        env=_selftest_env(),
+        env=_selftest_env(appdata),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
 
@@ -55,17 +68,22 @@ def test_selftest_cli_writes_ok_report(tmp_path: Path) -> None:
     assert payload["qfluentwidgets"] == version("PyQt6-Fluent-Widgets")
     assert payload["version"] == "1.0.0"
     assert set(payload) == {"ok", "errors", "python", "qt", "qfluentwidgets", "version"}
+    # 自检只写临时 APPDATA，并且真的初始化过日志。
+    assert (appdata / "PortHelperFluent" / "logs" / "app.log").is_file()
 
 
 def test_selftest_cli_creates_missing_report_directory(tmp_path: Path) -> None:
     report_path = tmp_path / "a" / "b" / "selftest.json"
+    appdata = tmp_path / "appdata"
 
     result = subprocess.run(
         [sys.executable, "main.py", "--selftest", "--report", str(report_path)],
         cwd=REPO_ROOT,
-        env=_selftest_env(),
+        env=_selftest_env(appdata),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
 
@@ -85,6 +103,103 @@ def test_selftest_reports_import_failure(tmp_path: Path, monkeypatch) -> None:
     assert exit_code == 1
     assert payload["ok"] is False
     assert any("no_such_module_for_selftest" in error for error in payload["errors"])
+
+
+def test_selftest_fails_on_read_only_app_log(tmp_path: Path, monkeypatch) -> None:
+    """只读 app.log 只让临时探针通过，自检必须自己发现日志文件不可写。"""
+    import main
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    app_log = paths.log_dir / "app.log"
+    _make_read_only(app_log, "旧日志内容\n")
+    report_path = tmp_path / "report.json"
+    monkeypatch.setattr(main, "resolve_paths", lambda: paths)
+    # 目录/文件探针本身已由 paths 测试覆盖；这里隔离它，验证自检自身的日志探测。
+    monkeypatch.setattr(main, "ensure_writable_paths", lambda p: (p, None))
+
+    try:
+        exit_code = main.run_selftest(report_path)
+    finally:
+        _restore_writable(app_log)
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert any("日志文件不可写" in error and "app.log" in error for error in payload["errors"])
+    # 自检不能改写或清空已有日志。
+    assert app_log.read_text(encoding="utf-8") == "旧日志内容\n"
+
+
+def test_selftest_fails_on_read_only_config(tmp_path: Path, monkeypatch) -> None:
+    import main
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    paths.data_dir.mkdir(parents=True)
+    paths.log_dir.mkdir()
+    config = paths.config_file
+    _make_read_only(config, '{"ui.theme": "dark"}\n')
+    report_path = tmp_path / "report.json"
+    monkeypatch.setattr(main, "resolve_paths", lambda: paths)
+    monkeypatch.setattr(main, "ensure_writable_paths", lambda p: (p, None))
+
+    try:
+        exit_code = main.run_selftest(report_path)
+    finally:
+        _restore_writable(config)
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert any("配置文件不可写" in error for error in payload["errors"])
+    assert config.read_text(encoding="utf-8") == '{"ui.theme": "dark"}\n'
+
+
+def test_selftest_cli_detects_read_only_app_log(tmp_path: Path) -> None:
+    """子进程完整链路：真实 APPDATA 指向临时目录，只读 app.log 必须让自检失败。"""
+    appdata = tmp_path / "appdata"
+    app_log = appdata / "PortHelperFluent" / "logs" / "app.log"
+    _make_read_only(app_log, "旧日志内容\n")
+    report_path = tmp_path / "report.json"
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "main.py", "--selftest", "--report", str(report_path)],
+            cwd=REPO_ROOT,
+            env=_selftest_env(appdata),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+    finally:
+        _restore_writable(app_log)
+
+    assert result.returncode == 1, result.stderr or result.stdout
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["ok"] is False
+    assert any("不可写" in error for error in payload["errors"])
+    assert "Traceback" not in result.stderr
+    assert app_log.read_text(encoding="utf-8") == "旧日志内容\n"
+
+
+def test_selftest_report_write_failure_returns_one_without_traceback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """报告写不出去时退出码为 1，且不能把异常抛给调用方（窗口化 exe 无 traceback）。"""
+    import main
+
+    def fail_write(*args, **kwargs) -> None:
+        raise PermissionError(13, "拒绝访问", str(tmp_path / "locked" / "report.json"))
+
+    monkeypatch.setattr(main, "write_text_atomic", fail_write)
+
+    exit_code = main.run_selftest(tmp_path / "report.json")
+
+    assert exit_code == 1
+    assert "写入自检报告失败" in capsys.readouterr().err
 
 
 def test_binding_check_accepts_current_install() -> None:
@@ -215,6 +330,19 @@ def _deny_mkdir(monkeypatch, denied: Path) -> None:
     monkeypatch.setattr(Path, "mkdir", fake_mkdir)
 
 
+def _make_read_only(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, stat.S_IREAD)
+
+
+def _restore_writable(path: Path) -> None:
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+
+
 def _portable_layout(tmp_path: Path):
     from app.services.paths import resolve_paths
 
@@ -266,19 +394,16 @@ def test_startup_failure_uses_effective_appdata_fallback_paths(
 def test_logging_setup_failure_keeps_effective_appdata_fallback_paths(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """回退到 AppData 后 app.log 只读导致 setup_logging 失败时，仍用生效路径写崩溃报告。"""
+    """回退到 AppData 后日志初始化失败时，仍用生效路径写崩溃报告。"""
     import main
     from app.services.paths import APP_NAME, AppPaths
 
     portable_paths, appdata = _portable_layout(tmp_path)
     fallback_data_dir = appdata / APP_NAME
     fallback_logs = fallback_data_dir / "logs"
-    fallback_logs.mkdir(parents=True)
-    read_only_log = fallback_logs / "app.log"
-    read_only_log.write_text("已有日志\n", encoding="utf-8")
-    # Windows 上置为只读后 RotatingFileHandler 打开 app.log 会抛 PermissionError，
-    # 目录本身仍可写，崩溃报告应照常落到这里。
-    os.chmod(read_only_log, stat.S_IREAD)
+
+    def fail_setup(log_dir: Path) -> None:
+        raise PermissionError(13, "拒绝访问", str(Path(log_dir) / "app.log"))
 
     handled: list[BaseException] = []
     effective_paths: list[AppPaths | None] = []
@@ -294,13 +419,11 @@ def test_logging_setup_failure_keeps_effective_appdata_fallback_paths(
     # 便携回退使用默认的 %APPDATA%，这里指向 tmp_path 以免污染真实用户目录。
     monkeypatch.setenv("APPDATA", str(appdata))
     monkeypatch.setattr(main, "resolve_paths", lambda: portable_paths)
+    monkeypatch.setattr(main, "setup_logging", fail_setup)
     monkeypatch.setattr(main, "_handle_startup_failure", record)
     monkeypatch.setattr(main, "_show_error_dialog", dialogs.append)
 
-    try:
-        exit_code = main.main([])
-    finally:
-        os.chmod(read_only_log, stat.S_IWRITE)
+    exit_code = main.main([])
 
     expected_paths = AppPaths(
         exe_dir=portable_paths.exe_dir,
@@ -316,9 +439,12 @@ def test_logging_setup_failure_keeps_effective_appdata_fallback_paths(
     assert effective_paths == [expected_paths]
     reports = list(fallback_logs.glob("crash-*.txt"))
     assert len(reports) == 1
-    assert read_only_log.name in reports[0].read_text(encoding="utf-8")
+    assert "app.log" in reports[0].read_text(encoding="utf-8")
     assert dialogs and "启动失败" in dialogs[0]
     assert str(fallback_logs) in dialogs[0]
+    # 权限类错误要给出只读/占用的具体指引，而不是只有“检查依赖”。
+    assert "只读" in dialogs[0]
+    assert "portable.flag" in dialogs[0]
     # 便携目录创建被拒绝，崩溃报告不可能落在那里，也不存在第二份报告。
     assert not portable_paths.data_dir.exists()
     assert not portable_paths.log_dir.exists()
@@ -383,7 +509,13 @@ def test_run_gui_warns_about_portable_fallback_and_keeps_running(
     # 不进入真实事件循环，只验证启动流程本身。
     monkeypatch.setattr(QApplication, "exec", lambda self: 0)
 
-    exit_code = main._run_gui()
+    from app.ui.qt_utils import uninstall_qt_message_handler
+
+    try:
+        exit_code = main._run_gui()
+    finally:
+        # _start_gui 会安装全局 Qt 消息处理器，测试结束后交还默认处理。
+        uninstall_qt_message_handler()
 
     assert exit_code == 0
     assert stub.shown is True
@@ -434,3 +566,112 @@ def test_thread_exception_hook_queues_dialog_to_gui_thread(
     assert len(calls) == 1
     assert calls[0][1] == threading.main_thread().name
     assert "子线程崩溃" in calls[0][0]
+
+
+def test_startup_failure_without_qapplication_uses_native_dialog(
+    tmp_path: Path, monkeypatch, qapp
+) -> None:
+    """没有 QApplication 时（窗口化 exe 最早期失败）必须退回系统对话框，不能静默返回。"""
+    import main
+    from PyQt6.QtWidgets import QApplication
+
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    native: list[str] = []
+    monkeypatch.delenv(main.NO_DIALOGS_ENV, raising=False)
+    # 真实 _show_error_dialog 会因为没有 QApplication 抛错，从而触发系统对话框兜底。
+    monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: None))
+    monkeypatch.setattr(main, "_show_native_error", native.append)
+
+    main._handle_startup_failure(PermissionError(13, "拒绝访问", "app.log"), paths)
+
+    assert len(native) == 1, "Qt 不可用时必须退回系统对话框"
+    assert "程序启动失败" in native[0]
+    assert "拒绝访问" in native[0]
+    assert "只读" in native[0]
+    reports = list(paths.log_dir.glob("crash-*.txt"))
+    assert len(reports) == 1
+    assert "拒绝访问" in reports[0].read_text(encoding="utf-8")
+
+
+def test_startup_failure_falls_back_to_native_when_qt_dialog_fails(
+    tmp_path: Path, monkeypatch, qapp
+) -> None:
+    """Qt 对话框本身失败时同样要退回系统对话框，不能静默吞掉错误。"""
+    import main
+
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    native: list[str] = []
+    monkeypatch.delenv(main.NO_DIALOGS_ENV, raising=False)
+
+    def broken_dialog(message: str) -> None:
+        raise RuntimeError("QMessageBox 创建失败")
+
+    monkeypatch.setattr(main, "_show_error_dialog", broken_dialog)
+    monkeypatch.setattr(main, "_show_native_error", native.append)
+
+    main._handle_startup_failure(RuntimeError("模拟启动失败"), paths)
+
+    assert len(native) == 1
+    assert "模拟启动失败" in native[0]
+
+
+def test_startup_failure_respects_no_dialogs_env(
+    tmp_path: Path, monkeypatch, qapp
+) -> None:
+    """PORTHELPER_NO_DIALOGS=1 时只写日志，绝不弹模态框（无界面子进程/测试用）。"""
+    import main
+    from PyQt6.QtWidgets import QApplication
+
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    native: list[str] = []
+    qt_dialogs: list[str] = []
+    monkeypatch.setenv(main.NO_DIALOGS_ENV, "1")
+    monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: None))
+    monkeypatch.setattr(main, "_show_native_error", native.append)
+    monkeypatch.setattr(main, "_show_error_dialog", qt_dialogs.append)
+
+    main._handle_startup_failure(RuntimeError("无界面环境"), paths)
+
+    assert native == []
+    assert qt_dialogs == []
+    reports = list(paths.log_dir.glob("crash-*.txt"))
+    assert len(reports) == 1
+
+
+def test_startup_failure_subprocess_reports_and_skips_modal(tmp_path: Path) -> None:
+    """子进程：只读 app.log + 禁用对话框时，退出码 1、留下崩溃报告且不阻塞。"""
+    appdata = tmp_path / "appdata"
+    logs = appdata / "PortHelperFluent" / "logs"
+    app_log = logs / "app.log"
+    _make_read_only(app_log, "旧日志内容\n")
+
+    try:
+        # 若仍尝试弹模态框，进程会一直挂起直到 timeout 报错。
+        result = subprocess.run(
+            [sys.executable, "main.py"],
+            cwd=REPO_ROOT,
+            env=_selftest_env(appdata, PORTHELPER_NO_DIALOGS="1"),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+    finally:
+        _restore_writable(app_log)
+
+    assert result.returncode == 1, result.stderr or result.stdout
+    reports = list(logs.glob("crash-*.txt"))
+    assert len(reports) == 1
+    content = reports[0].read_text(encoding="utf-8")
+    assert "不可写" in content
+    assert "app.log" in content
+    assert app_log.read_text(encoding="utf-8") == "旧日志内容\n"
+    # 启动失败被正常处理：进程没有以未捕获异常退出（没有 "Exception ignored" 之类）。
+    assert "Exception ignored" not in result.stderr

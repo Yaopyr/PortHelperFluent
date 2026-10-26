@@ -1,3 +1,5 @@
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -10,6 +12,20 @@ def _make_exe_dir(tmp_path: Path) -> Path:
     exe_dir = tmp_path / "PortHelper"
     exe_dir.mkdir()
     return exe_dir
+
+
+def _make_read_only_file(path: Path, content: str) -> None:
+    """创建带内容的只读文件，并返回后由调用方在 finally 里恢复可写。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    os.chmod(path, stat.S_IREAD)
+
+
+def _restore_writable(path: Path) -> None:
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
 
 
 def test_portable_flag_redirects_data_next_to_exe(tmp_path: Path) -> None:
@@ -239,3 +255,103 @@ def test_portable_and_appdata_both_unwritable_raises_chinese_error(
     assert str(paths.data_dir) in message
     assert str(appdata / APP_NAME) in message
     assert isinstance(info.value.__cause__, PermissionError)
+
+
+def _portable_layout(tmp_path: Path):
+    exe_dir = _make_exe_dir(tmp_path)
+    (exe_dir / "portable.flag").write_text("1", encoding="utf-8")
+    appdata = tmp_path / "roaming"
+    return resolve_paths(exe_path=exe_dir, appdata=appdata), appdata
+
+
+@pytest.mark.parametrize(
+    ("target_name", "content", "label"),
+    [
+        ("app.log", "旧日志内容\n", "日志文件"),
+        ("config.json", '{"ui.theme": "dark"}\n', "配置文件"),
+    ],
+)
+def test_portable_read_only_existing_file_falls_back_to_appdata(
+    tmp_path: Path, target_name: str, content: str, label: str
+) -> None:
+    """便携目录可写但其中的 app.log/config.json 只读时，也必须回退到 AppData。"""
+    paths, appdata = _portable_layout(tmp_path)
+    assert paths.portable is True
+    target = (paths.log_dir / "app.log") if target_name == "app.log" else paths.config_file
+    _make_read_only_file(target, content)
+
+    try:
+        effective, warning = ensure_writable_paths(paths, appdata=appdata)
+    finally:
+        _restore_writable(target)
+
+    assert effective.portable is False
+    assert effective.data_dir == appdata / APP_NAME
+    assert effective.log_dir == appdata / APP_NAME / "logs"
+    assert warning
+    assert "便携" in warning
+    assert "AppData" in warning
+    assert str(target) in warning
+    assert label in warning
+    # 探针只打开并关闭，绝不改写被探测的文件。
+    assert target.read_text(encoding="utf-8") == content
+    assert list(paths.data_dir.rglob("*.probe")) == []
+
+
+@pytest.mark.parametrize(
+    ("target_name", "content", "label"),
+    [
+        ("app.log", "旧日志内容\n", "日志文件"),
+        ("config.json", '{"ui.theme": "dark"}\n', "配置文件"),
+    ],
+)
+def test_appdata_read_only_existing_file_raises_chinese_error(
+    tmp_path: Path, target_name: str, content: str, label: str
+) -> None:
+    """非便携模式下已有文件只读时，必须抛出清晰的中文错误，而不是返回坏路径。"""
+    appdata = tmp_path / "roaming"
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=appdata)
+    target = (paths.log_dir / "app.log") if target_name == "app.log" else paths.config_file
+    _make_read_only_file(target, content)
+
+    try:
+        with pytest.raises(OSError) as info:
+            ensure_writable_paths(paths)
+    finally:
+        _restore_writable(target)
+
+    message = str(info.value)
+    assert label in message
+    assert str(target) in message
+    assert "只读" in message
+    assert isinstance(info.value.__cause__, PermissionError)
+    assert target.read_text(encoding="utf-8") == content
+    assert list(paths.data_dir.rglob("*.probe")) == []
+
+
+def test_portable_read_only_file_and_unwritable_appdata_raises_chinese_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """便携目录里的文件只读、AppData 也不可写时，回退失败必须给出中文错误。"""
+    paths, appdata = _portable_layout(tmp_path)
+    target = paths.log_dir / "app.log"
+    _make_read_only_file(target, "旧日志内容\n")
+    original_open = Path.open
+
+    def fake_open(self: Path, *args, **kwargs):
+        if self.suffix == ".probe" and appdata in self.parents:
+            raise PermissionError(13, "拒绝访问", str(self))
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    try:
+        with pytest.raises(OSError) as info:
+            ensure_writable_paths(paths, appdata=appdata)
+    finally:
+        _restore_writable(target)
+
+    message = str(info.value)
+    assert "不可写" in message
+    assert str(appdata / APP_NAME) in message
+    assert target.read_text(encoding="utf-8") == "旧日志内容\n"

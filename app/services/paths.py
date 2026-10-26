@@ -13,6 +13,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core.logging_setup import LOG_FILE_NAME
+
 APP_NAME = "PortHelperFluent"
 PORTABLE_FLAG = "portable.flag"
 
@@ -76,17 +78,20 @@ def ensure_dirs(paths: AppPaths) -> None:
 def ensure_writable_paths(
     paths: AppPaths, appdata: Path | None = None
 ) -> tuple[AppPaths, str | None]:
-    """创建并验证数据目录与日志目录，便携模式不可写时回退到 AppData。
+    """创建并验证数据目录、日志目录以及已有配置文件/日志文件，便携模式不可写时回退。
 
     返回实际生效的 `AppPaths` 与中文回退提示（未回退时为 None）。
-    回退目录同样要创建并实际写一次探针文件；便携目录与 AppData 都不可写时抛出
-    中文 `OSError`，绝不返回一个稍后才失败的路径。
-    非便携模式下 AppData 本身就不可写，原始异常原样抛出，不做无意义的二次尝试。
+    除了目录探针，还会打开已有的 `logs/app.log` 与 `config.json` 验证文件级写入
+    权限——目录可写但文件只读/被占用同样会让日志与配置在稍后失败，必须提前发现。
+    便携模式遇到任何写失败都回退 AppData；AppData 模式下的文件级失败抛出中文
+    `OSError`，绝不返回一个稍后才失败的路径。非便携模式的目录创建失败保持原样
+    抛出，不做无意义的二次尝试。
     """
     try:
         ensure_dirs(paths)
         _probe_write(paths.data_dir)
         _probe_write(paths.log_dir)
+        _probe_existing_files(paths)
     except OSError as exc:
         if not paths.portable:
             raise
@@ -95,6 +100,7 @@ def ensure_writable_paths(
             ensure_dirs(fallback)
             _probe_write(fallback.data_dir)
             _probe_write(fallback.log_dir)
+            _probe_existing_files(fallback)
         except OSError as fallback_exc:
             raise OSError(
                 "便携模式数据目录与 AppData 回退目录都不可写："
@@ -121,3 +127,31 @@ def _probe_write(directory: Path) -> None:
             handle.write(b"0")
     finally:
         probe.unlink(missing_ok=True)
+
+
+def _probe_existing_files(paths: AppPaths) -> None:
+    """打开已有 `logs/app.log` 与 `config.json` 验证文件级写权限，不写入任何内容。
+
+    只读或被占用的文件在 Windows 上会让 `open(..., "ab")` / `open(..., "r+b")`
+    抛 `PermissionError`，正好暴露“目录可写但文件不可写”的情况。文件不存在时跳过
+    （目录探针已经证明可以新建），避免留下空文件。失败时抛出带中文说明的
+    `OSError`，由调用方决定回退还是上抛。
+    """
+    for target, mode, label in (
+        (paths.log_dir / LOG_FILE_NAME, "ab", "日志文件"),
+        (paths.config_file, "r+b", "配置文件"),
+    ):
+        if not target.exists():
+            continue
+        try:
+            with target.open(mode):
+                # 只打开并立即关闭：追加/更新模式不会截断或改写已有内容。
+                pass
+        except OSError as exc:
+            raise PermissionError(
+                13,
+                f"{label}不可写：{target}。"
+                "请取消文件的只读属性、关闭占用它的程序，"
+                "或把数据目录改到有写入权限的位置。",
+                str(target),
+            ) from exc
