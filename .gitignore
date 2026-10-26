@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build_work/
+*.log
+
+# Extracted original assets and bulky raw string dumps stay local, never in the repo.
+analysis/resources/
+analysis/images/
+analysis/strings/ascii.txt
+analysis/strings/utf16.txt
+analysis/strings/chinese.txt
+analysis/rea/
