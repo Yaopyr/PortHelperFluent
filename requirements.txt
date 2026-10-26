@@ -1,0 +1,10 @@
+PyQt6==6.11.0
+PyQt6-Fluent-Widgets==1.11.2
+pyserial==3.5
+psutil==7.2.1
+Pillow==12.3.0
+numpy==2.3.4
+hidapi==0.15.0
+qrcode==8.2
+pytest==9.1.1
+pyinstaller==6.19.0
