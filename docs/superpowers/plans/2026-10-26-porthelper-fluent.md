@@ -361,20 +361,24 @@ git commit -m "feat: add core foundation, settings, logging, session log and sel
 ## Task 2: Fluent UI Shell and Shared Widgets
 
 **Files:**
-- Create: `app/ui/theme.py`, `app/ui/qt_utils.py`, `app/ui/feedback.py`
+- Modify: `app/ui/qt_utils.py` (it already contains the Qt message handler from Task 1; add `safe_slot`, `readable_message`, `process_events_until`; also fix the handler assignment-after-install, restore the previous handler on uninstall, and log a crash report for `QtFatalMsg`)
+- Create: `app/ui/theme.py`, `app/ui/feedback.py`
 - Create: `app/ui/widgets/__init__.py`, `cards.py`, `status_chip.py`, `empty_state.py`, `file_picker.py`, `log_pane.py`, `hex_editor.py`
 - Create: `app/ui/dialogs/__init__.py`, `session_dialog.py`
 - Create: `app/ui/pages/placeholder.py`, and placeholders `serial_page.py`, `net_client_page.py`, `net_server_page.py`, `hid_page.py`, `checksum_page.py`, `image_page.py`, `dotmatrix_page.py`, `c51_page.py`, `settings_page.py`, `convert/__init__.py`
 - Create: `app/ui/main_window.py`
-- Modify: `main.py` (real smoke test, real MainWindow)
+- Modify: `main.py` (real smoke test, `create_main_window(settings, paths)`, remove the Task 1 placeholder fallback and `build_placeholder_window`; update Task 1 selftest tests that call the old signature)
 - Create tests: `tests/test_widgets.py`, `tests/test_main_window.py`
+- Update: `tests/test_selftest.py` (call the new `create_main_window(settings, paths)` seam and remove placeholder-specific expectations; keep the no-QApplication/native-dialog coverage intact)
 - Create: `build/app.spec` minimal (optional onedir build)
 
 **Depends on:** Task 1.
 
+Task 1 already provides working `AppPaths`, `Settings`, `SessionLog`, logging, selftest, native startup fallback and a Qt message handler. Do not recreate those; extend them. `MainWindow` must receive both `Settings` and `AppPaths` and pass the paths to pages that need config/log locations. After the real main window exists, `main.create_main_window` must fail loudly if it cannot be imported — no silent placeholder fallback.
+
 Step 1: Implement `app/ui/feedback.py` with `show_info`, `show_success`, `show_warning`, `show_error` using qfluentwidgets `InfoBar` (`InfoBarPosition.TOP_RIGHT`, 3 s info, 5 s error). If the parent is not visible, fall back to a non-blocking `QMessageBox` only for errors; info calls no-op. Tests may monkeypatch `InfoBar` and assert the call.
 
-Step 2: Implement `app/ui/qt_utils.py`:
+Step 2: Extend `app/ui/qt_utils.py` (do not recreate the existing Qt message handler):
 
 ```python
 def safe_slot(func):
@@ -392,7 +396,7 @@ def safe_slot(func):
 def process_events_until(predicate, timeout_ms: int = 2000) -> bool
 ```
 
-`readable_message` maps `PermissionError`, `FileNotFoundError`, `serial.SerialException`, `OSError` to Chinese sentences. `process_events_until` is used by Qt tests.
+`readable_message` maps `PermissionError`, `FileNotFoundError`, `serial.SerialException`, `OSError` to Chinese sentences. `process_events_until` is used by Qt tests. Also apply the code-quality follow-ups: assign `_MESSAGE_HANDLER` only after `qInstallMessageHandler` succeeds, restore the previous handler on uninstall, and use a `threading.local()` recursion guard (already present from Task 1 — keep it). For `QtFatalMsg`, log a crash report in addition to the critical log.
 
 Step 3: Implement `app/ui/theme.py`:
 
@@ -445,7 +449,7 @@ Step 7: Implement `app/ui/main_window.py`.
 - Close confirmation only when a page reports an active connection/listener; expose `has_active_work()` on pages, default False. On confirm, stop workers and save settings.
 - Add `smoke_test()` method returning True after construction.
 
-Step 8: Update `main.py`: add `--smoke-test` (create app/window, show, `QTimer.singleShot(1500, app.quit)`, exec, return 0), and import the real `MainWindow`.
+Step 8: Update `main.py`: add `--smoke-test` (create app/window, show, `QTimer.singleShot(1500, app.quit)`, exec, return 0), import the real `MainWindow`, change `create_main_window(settings, paths)` to pass both, and remove `build_placeholder_window` plus the import-failure placeholder fallback. A missing or broken main window must now fail startup/selftest instead of showing “under construction”. Update the Task 1 selftest tests that call `create_main_window(settings)` or depend on the placeholder; preserve the native-dialog/no-QApplication tests.
 
 Step 9: Create `build/app.spec` minimal onedir spec with `Analysis(['main.py'])`, `COLLECT`, name `PortHelperFluent`, `console=False`, and a placeholder icon path only if it exists. This is a smoke build; Task 12 finalises onefile.
 
