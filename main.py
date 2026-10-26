@@ -168,11 +168,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def _run_gui() -> int:
     """解析生效路径后启动界面；启动失败时把生效路径交给启动失败处理。"""
     paths, portable_warning = ensure_writable_paths(resolve_paths())
-    logger = setup_logging(paths.log_dir)
-    # QApplication 还没创建：钩子只写日志与崩溃报告，不触碰任何 Qt 控件。
-    # `_start_gui` 在 QApplication 就绪后会换成排队到 GUI 线程的错误提示回调。
-    install_exception_hooks(paths.log_dir)
     try:
+        # 日志初始化与异常钩子都可能失败（例如回退目录里的 app.log 只读），
+        # 必须放在 try 内，保证失败时仍用已解析出的生效路径写崩溃报告。
+        logger = setup_logging(paths.log_dir)
+        # QApplication 还没创建：钩子只写日志与崩溃报告，不触碰任何 Qt 控件。
+        # `_start_gui` 在 QApplication 就绪后会换成排队到 GUI 线程的错误提示回调。
+        install_exception_hooks(paths.log_dir)
         return _start_gui(paths, portable_warning, logger)
     except Exception as exc:
         # 必须传生效路径：便携目录不可写时崩溃报告要落在 AppData 回退目录。

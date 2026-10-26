@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -260,6 +261,68 @@ def test_startup_failure_uses_effective_appdata_fallback_paths(
     assert str(fallback_logs) in dialogs[0]
     # 窗口创建失败在对话框之前，提示框不应再弹出。
     assert warnings == []
+
+
+def test_logging_setup_failure_keeps_effective_appdata_fallback_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """回退到 AppData 后 app.log 只读导致 setup_logging 失败时，仍用生效路径写崩溃报告。"""
+    import main
+    from app.services.paths import APP_NAME, AppPaths
+
+    portable_paths, appdata = _portable_layout(tmp_path)
+    fallback_data_dir = appdata / APP_NAME
+    fallback_logs = fallback_data_dir / "logs"
+    fallback_logs.mkdir(parents=True)
+    read_only_log = fallback_logs / "app.log"
+    read_only_log.write_text("已有日志\n", encoding="utf-8")
+    # Windows 上置为只读后 RotatingFileHandler 打开 app.log 会抛 PermissionError，
+    # 目录本身仍可写，崩溃报告应照常落到这里。
+    os.chmod(read_only_log, stat.S_IREAD)
+
+    handled: list[BaseException] = []
+    effective_paths: list[AppPaths | None] = []
+    dialogs: list[str] = []
+    original_handler = main._handle_startup_failure
+
+    def record(exc: BaseException, paths: AppPaths | None = None) -> None:
+        handled.append(exc)
+        effective_paths.append(paths)
+        original_handler(exc, paths)
+
+    _deny_mkdir(monkeypatch, portable_paths.data_dir)
+    # 便携回退使用默认的 %APPDATA%，这里指向 tmp_path 以免污染真实用户目录。
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(main, "resolve_paths", lambda: portable_paths)
+    monkeypatch.setattr(main, "_handle_startup_failure", record)
+    monkeypatch.setattr(main, "_show_error_dialog", dialogs.append)
+
+    try:
+        exit_code = main.main([])
+    finally:
+        os.chmod(read_only_log, stat.S_IWRITE)
+
+    expected_paths = AppPaths(
+        exe_dir=portable_paths.exe_dir,
+        data_dir=fallback_data_dir,
+        config_file=fallback_data_dir / "config.json",
+        log_dir=fallback_logs,
+        portable=False,
+    )
+    assert exit_code == 1
+    assert len(handled) == 1
+    assert isinstance(handled[0], PermissionError)
+    # 关键断言：启动失败处理拿到的是已回退的生效路径，而不是重新解析出的便携路径。
+    assert effective_paths == [expected_paths]
+    reports = list(fallback_logs.glob("crash-*.txt"))
+    assert len(reports) == 1
+    assert read_only_log.name in reports[0].read_text(encoding="utf-8")
+    assert dialogs and "启动失败" in dialogs[0]
+    assert str(fallback_logs) in dialogs[0]
+    # 便携目录创建被拒绝，崩溃报告不可能落在那里，也不存在第二份报告。
+    assert not portable_paths.data_dir.exists()
+    assert not portable_paths.log_dir.exists()
+    assert list(tmp_path.rglob("crash-*.txt")) == reports
 
 
 def test_main_routes_gui_error_to_startup_handler(tmp_path: Path, monkeypatch) -> None:
