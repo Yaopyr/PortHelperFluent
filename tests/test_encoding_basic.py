@@ -41,6 +41,50 @@ def test_parse_hex_accepts_prefixes_and_separators() -> None:
     assert parse_hex("01020304") == b"\x01\x02\x03\x04"
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("0x01", b"\x01"),
+        ("0X0A", b"\x0a"),
+        (r"\x01", b"\x01"),
+        (r"\X0A", b"\x0a"),
+        ("0x01 02,0A", b"\x01\x02\x0a"),
+        ("01\t02\n03;04", b"\x01\x02\x03\x04"),
+        (r"\x01\x02", b"\x01\x02"),
+        ("0x01\\x02", b"\x01\x02"),
+        ("", b""),
+        (" \t\r\n,; ", b""),
+    ],
+)
+def test_parse_hex_accepts_supported_forms(text: str, expected: bytes) -> None:
+    assert parse_hex(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "marker"),
+    [
+        ("0x", "0x"),
+        ("0X", "0X"),
+        (r"\x", r"\x"),
+        ("0x0", "0x0"),
+        ("010x2", "x"),
+        ("0x0G", "G"),
+        ("0x0123 4", "4"),
+        ("GG", "GG"),
+        ("0x01Z", "Z"),
+        ("0x 01", "0x"),
+        ("0x0x01", "x"),
+    ],
+)
+def test_parse_hex_rejects_malformed_forms(text: str, marker: str) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        parse_hex(text)
+
+    message = str(excinfo.value)
+    assert marker in message
+    assert "十六进制" in message
+
+
 def test_parse_hex_allows_empty_text() -> None:
     assert parse_hex("") == b""
     assert parse_hex("   ") == b""

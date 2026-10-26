@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,78 @@ def test_save_creates_parent_directory(tmp_path: Path) -> None:
 
     assert config_path.is_file()
     assert not list(config_path.parent.glob("*.tmp"))
+
+
+def test_bom_prefixed_config_is_loaded(config_path: Path) -> None:
+    payload = json.dumps({"serial.port": "COM5"}, ensure_ascii=False).encode("utf-8")
+    config_path.write_bytes(b"\xef\xbb\xbf" + payload)
+    settings = Settings(config_path)
+
+    settings.load()
+
+    assert settings.warning is None
+    assert settings.get("serial.port") == "COM5"
+    assert list(config_path.parent.glob("config.bad-*.json")) == []
+
+
+def test_read_oserror_keeps_defaults_without_renaming(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_text = '{"serial.port": "COM5"}'
+    config_path.write_text(original_text, encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def locked_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == config_path:
+            raise PermissionError(13, "拒绝访问", str(self))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", locked_read_text)
+    settings = Settings(config_path)
+
+    settings.load()
+
+    assert config_path.is_file()
+    assert original_read_text(config_path, encoding="utf-8") == original_text
+    assert list(config_path.parent.glob("config.bad-*.json")) == []
+    assert settings.warning is not None
+    assert config_path.name in settings.warning
+    assert "读取" in settings.warning
+    assert "默认" in settings.warning
+    assert settings.get("serial.port") == ""
+    assert settings.get("serial.baud") == 115200
+
+
+def test_invalid_utf8_is_backed_up_and_defaults_restored(config_path: Path) -> None:
+    config_path.write_bytes(b'{"serial.port": "\xff\xfe"}')
+    settings = Settings(config_path)
+
+    settings.load()
+
+    assert settings.warning is not None
+    assert "备份" in settings.warning
+    assert len(list(config_path.parent.glob("config.bad-*.json"))) == 1
+    assert settings.get("serial.port") == ""
+
+
+def test_corrupt_loads_in_same_second_create_distinct_backups(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> "FixedDatetime":
+            return cls(2026, 10, 26, 13, 45, 0, 123456)
+
+    monkeypatch.setattr("app.core.settings.datetime", FixedDatetime)
+    config_path.write_text("{ first", encoding="utf-8")
+    Settings(config_path).load()
+    config_path.write_text("{ second", encoding="utf-8")
+    Settings(config_path).load()
+
+    backups = list(config_path.parent.glob("config.bad-*.json"))
+    assert len(backups) == 2
+    assert len({backup.name for backup in backups}) == 2
+    assert {backup.read_text(encoding="utf-8") for backup in backups} == {
+        "{ first",
+        "{ second",
+    }

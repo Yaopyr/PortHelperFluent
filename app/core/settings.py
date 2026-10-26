@@ -60,8 +60,22 @@ class Settings:
         if not self._path.is_file():
             return
         try:
-            loaded = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # utf-8-sig 兼容带 BOM 的合法配置，避免把记事本等工具写出的 BOM 当损坏。
+            text = self._path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            self._recover_from_bad_file(exc)
+            return
+        except OSError as exc:
+            # 读不了（只读/被占用/权限不足）不等于内容损坏：保留默认值且绝不移动文件，
+            # 否则用户修复权限后配置已经不见了。
+            self._warning = (
+                f"无法读取配置文件 {self._path}（{exc}），已使用默认设置；"
+                "原文件未作改动，请检查文件权限或是否被其他程序占用。"
+            )
+            return
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError as exc:
             self._recover_from_bad_file(exc)
             return
         if not isinstance(loaded, dict):
@@ -100,10 +114,36 @@ class Settings:
         return copy.deepcopy(self._data)
 
     def _recover_from_bad_file(self, error: Exception) -> None:
-        backup = self._path.with_name(f"config.bad-{datetime.now():%Y%m%d-%H%M%S}.json")
+        backup: Path | None = None
         try:
+            backup = self._unique_backup_path()
             self._path.replace(backup)
-            backup_note = f"已备份为 {backup.name}"
         except OSError:
+            if backup is not None:
+                try:
+                    backup.unlink()
+                except OSError:
+                    pass
             backup_note = "备份失败，请检查文件权限"
+        else:
+            backup_note = f"已备份为 {backup.name}"
         self._warning = f"配置文件损坏（{error}），{backup_note}，已恢复默认设置。"
+
+    def _unique_backup_path(self) -> Path:
+        """生成同一秒内也不会重名的备份路径，并以独占方式占位。
+
+        文件名带微秒与 PID；极端情况下（同一微秒、同一进程）出现重名时再追加
+        `-1`、`-2` 后缀。`O_EXCL` 保证占位是原子的，不会覆盖已有备份。
+        """
+        timestamp = datetime.now()
+        stamp = f"{timestamp:%Y%m%d-%H%M%S}-{timestamp.microsecond:06d}-pid{os.getpid()}"
+        for attempt in range(1000):
+            suffix = f"-{attempt}" if attempt else ""
+            candidate = self._path.with_name(f"config.bad-{stamp}{suffix}.json")
+            try:
+                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            os.close(fd)
+            return candidate
+        raise OSError(f"无法在 {self._path.parent} 中创建唯一的配置备份文件名")

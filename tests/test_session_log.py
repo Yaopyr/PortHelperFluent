@@ -94,6 +94,70 @@ def test_clear_empties_records_but_keeps_lifetime_counters() -> None:
     assert log.total_bytes() == 3
 
 
+def test_reset_counters_zeros_totals_without_clearing_records() -> None:
+    log = SessionLog()
+    log.add_bytes(b"abc", "rx")
+    log.add_bytes(b"de", "tx")
+    log.add_bytes(b"notice", "info")
+
+    log.reset_counters()
+
+    assert len(log.records()) == 3
+    assert log.total_bytes() == 0
+    assert log.total_bytes("rx") == 0
+    assert log.total_bytes("tx") == 0
+    assert log.total_bytes("info") == 0
+    log.add_bytes(b"x", "rx")
+    assert log.total_bytes("rx") == 1
+
+
+def test_oversized_record_truncation_counts_dropped_bytes() -> None:
+    log = SessionLog(max_bytes=4, max_records=10)
+
+    log.add_bytes(b"0123456789", "rx")
+
+    assert log.records()[0].data == b"6789"
+    assert log.dropped_bytes == 6
+    assert log.dropped_records == 0
+
+
+def test_record_cap_drops_increment_dropped_counters() -> None:
+    log = SessionLog(max_records=3)
+
+    for index in range(5):
+        log.add_bytes(str(index).encode("ascii"), "rx")
+
+    assert [record.data for record in log.records()] == [b"2", b"3", b"4"]
+    assert log.dropped_records == 2
+    assert log.dropped_bytes == 2
+
+
+def test_byte_cap_drops_increment_dropped_counters() -> None:
+    log = SessionLog(max_bytes=10)
+
+    for _ in range(3):
+        log.add_bytes(b"abcd", "tx")
+
+    assert len(log.records()) == 2
+    assert log.dropped_records == 1
+    assert log.dropped_bytes == 4
+
+
+def test_clear_releases_byte_budget_and_keeps_dropped_stats() -> None:
+    log = SessionLog(max_bytes=4)
+    log.add_bytes(b"abcdef", "rx")
+    assert log.dropped_bytes == 2
+
+    log.clear()
+
+    assert log.records() == ()
+    assert log.total_bytes("rx") == 6
+    log.add_bytes(b"wxyz", "tx")
+    assert [record.data for record in log.records()] == [b"wxyz"]
+    assert log.dropped_bytes == 2
+    assert log.dropped_records == 0
+
+
 def test_export_txt_contains_chinese_and_prefixes(tmp_path: Path) -> None:
     log = SessionLog()
     log.add(_record("rx", "你好"))

@@ -24,11 +24,13 @@ class LogRecord:
 
 
 class SessionLog:
-    """内存会话记录。
+    """内存会话记录，仅供 GUI 主线程使用（非线程安全）。
 
-    记录数或保留字节数超过上限时先截断单条超长记录（只保留最新字节），
-    再丢弃最旧记录；累计收发字节数保留生命周期总量，因此界面上的收发计数
-    不会因丢帧、截断或清空记录而回退。
+    工作线程先通过信号把数据投递到 GUI 线程，再调用本类；不要在串口/网络线程
+    直接读写。记录数或保留字节数超过上限时先截断单条超长记录（只保留最新字节），
+    再丢弃最旧记录；累计收发字节数保留生命周期总量，因此界面上的收发计数不会因
+    丢帧、截断或清空记录而回退。截断/丢弃造成的损失可通过 `dropped_bytes` 与
+    `dropped_records` 查看，`reset_counters()` 只清零生命周期字节计数。
     """
 
     def __init__(self, max_bytes: int = 8 * 1024 * 1024, max_records: int = 100_000) -> None:
@@ -39,6 +41,18 @@ class SessionLog:
         self._records: deque[LogRecord] = deque()
         self._kept_bytes = 0
         self._lifetime_bytes: dict[str, int] = {"rx": 0, "tx": 0, "info": 0}
+        self._dropped_bytes = 0
+        self._dropped_records = 0
+
+    @property
+    def dropped_bytes(self) -> int:
+        """因单条截断或旧记录被丢弃而未保留的字节总数（生命周期累计）。"""
+        return self._dropped_bytes
+
+    @property
+    def dropped_records(self) -> int:
+        """因记录数或字节上限被丢弃的完整记录条数（单条截断不计入）。"""
+        return self._dropped_records
 
     def add(self, record: LogRecord) -> None:
         full_size = len(record.data)
@@ -53,6 +67,7 @@ class SessionLog:
                 source=record.source,
                 data=bytes(record.data[-self._max_bytes :]),
             )
+            self._dropped_bytes += full_size - self._max_bytes
         self._records.append(record)
         self._kept_bytes += len(record.data)
         while self._records and (
@@ -60,6 +75,8 @@ class SessionLog:
         ):
             dropped = self._records.popleft()
             self._kept_bytes -= len(dropped.data)
+            self._dropped_records += 1
+            self._dropped_bytes += len(dropped.data)
 
     def add_bytes(self, data: bytes, direction: str, source: str = "") -> LogRecord:
         """追加一条记录；返回值是调用方创建的完整记录（存储副本可能因字节上限被截断）。"""
@@ -68,8 +85,13 @@ class SessionLog:
         return record
 
     def clear(self) -> None:
+        """清空已保留的记录与占用字节；生命周期计数与丢弃统计保持不变。"""
         self._records.clear()
         self._kept_bytes = 0
+
+    def reset_counters(self) -> None:
+        """清零生命周期 RX/TX/info 字节计数，但保留记录内容与丢弃统计。"""
+        self._lifetime_bytes = {"rx": 0, "tx": 0, "info": 0}
 
     def records(self) -> tuple[LogRecord, ...]:
         return tuple(self._records)
