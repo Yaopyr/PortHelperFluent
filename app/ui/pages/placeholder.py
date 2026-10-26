@@ -23,11 +23,15 @@ class PlaceholderPage(QWidget):
         settings=None,
         paths=None,
         parent: QWidget | None = None,
+        **kwargs,
     ) -> None:
         super().__init__(parent)
         self.settings = settings
         self.paths = paths
         self.setObjectName(route)
+        # 后续任务的页面会接收 worker_factory 等扩展参数；占位阶段接受并忽略，
+        # 保证主窗口始终可以使用统一的 (settings, paths, parent=...) 构造契约。
+        self.extra_options = dict(kwargs)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)

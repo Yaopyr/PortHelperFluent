@@ -8,7 +8,9 @@ from app.ui.pages.placeholder import PlaceholderPage
 
 
 class ImagePage(PlaceholderPage):
-    def __init__(self, settings=None, paths=None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, settings=None, paths=None, parent: QWidget | None = None, **kwargs
+    ) -> None:
         super().__init__(
             "图片取模",
             "图片预览、颜色深度与扫描方向导出将在图片取模任务中提供。",
@@ -16,4 +18,5 @@ class ImagePage(PlaceholderPage):
             settings=settings,
             paths=paths,
             parent=parent,
+            **kwargs,
         )

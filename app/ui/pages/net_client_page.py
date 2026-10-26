@@ -8,7 +8,9 @@ from app.ui.pages.placeholder import PlaceholderPage
 
 
 class NetClientPage(PlaceholderPage):
-    def __init__(self, settings=None, paths=None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, settings=None, paths=None, parent: QWidget | None = None, **kwargs
+    ) -> None:
         super().__init__(
             "网络调试",
             "TCP/UDP 客户端、Ping 与网卡信息将在网络调试任务中提供。",
@@ -16,4 +18,5 @@ class NetClientPage(PlaceholderPage):
             settings=settings,
             paths=paths,
             parent=parent,
+            **kwargs,
         )

@@ -13,6 +13,12 @@ from app.core.encoding import decode_bytes, to_hex
 from app.services.exports import write_text_atomic
 
 DATA_DIRECTIONS = ("rx", "tx")
+_DIRECTION_LABELS = {"rx": "RX", "tx": "TX", "info": "信息"}
+
+
+def direction_label(direction: str) -> str:
+    """界面、TXT 与 CSV 共用的方向显示名（信息行统一为“信息”）。"""
+    return _DIRECTION_LABELS.get(direction, direction.upper())
 
 
 @dataclass(frozen=True)
@@ -103,41 +109,51 @@ class SessionLog:
         return self._lifetime_bytes.get(direction, 0)
 
     def export_txt(self, path: Path, codec: str = "utf-8", hex_mode: bool = False) -> None:
-        """导出文本；文件固定 UTF-8，codec 只用于把原始字节解码成文本列。"""
+        """导出文本；文件固定 UTF-8，codec 只用于把原始字节解码成文本列。
+
+        信息行是程序生成的 UTF-8 文本，即使 hex_mode 为 True 也始终按文本导出。
+        """
         lines = []
         for record in self._records:
             payload = _format_payload(record, codec, hex_mode)
             prefix = f"{record.source}: " if record.source else ""
             lines.append(
-                f"[{_format_time(record.timestamp)}] [{record.direction.upper()}] {prefix}{payload}"
+                f"[{_format_time(record.timestamp)}] [{direction_label(record.direction)}] "
+                f"{prefix}{payload}"
             )
         write_text_atomic(Path(path), "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
     def export_csv(self, path: Path, codec: str = "utf-8", hex_mode: bool = False) -> None:
-        """导出 CSV；文件使用带 BOM 的 UTF-8，hex_mode 为 True 时 text 列留空。"""
+        """导出 CSV；文件使用带 BOM 的 UTF-8。
+
+        hex_mode 为 True 时数据行 text 列留空，但信息行仍输出文本，与界面/TXT 一致。
+        """
         buffer = io.StringIO()
         writer = csv.writer(buffer, lineterminator="\r\n")
         writer.writerow(["time", "direction", "source", "length", "hex", "text"])
         for record in self._records:
+            is_info = record.direction == "info"
             writer.writerow(
                 [
                     _format_datetime(record.timestamp),
-                    record.direction.upper(),
+                    direction_label(record.direction),
                     record.source,
                     len(record.data),
                     to_hex(record.data),
-                    "" if hex_mode else _format_payload(record, codec, hex_mode=False),
+                    _format_payload(record, codec, hex_mode=False)
+                    if is_info or not hex_mode
+                    else "",
                 ]
             )
         write_text_atomic(Path(path), buffer.getvalue(), encoding="utf-8-sig")
 
 
 def _format_payload(record: LogRecord, codec: str, hex_mode: bool) -> str:
-    """信息行是程序生成的 UTF-8 文本，不随串口/网络编码切换而改变。"""
-    if hex_mode:
-        return to_hex(record.data)
+    """信息行是程序生成的 UTF-8 文本，不随 HEX 模式或串口/网络编码切换而改变。"""
     if record.direction == "info":
         return record.data.decode("utf-8", errors="replace")
+    if hex_mode:
+        return to_hex(record.data)
     return decode_bytes(record.data, codec)
 
 

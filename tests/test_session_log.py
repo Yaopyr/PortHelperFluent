@@ -223,3 +223,38 @@ def test_export_csv_hex_mode_column(tmp_path: Path) -> None:
     text = target.read_text(encoding="utf-8-sig")
     assert "TX" in text
     assert "41" in text
+
+
+def test_export_txt_info_is_text_even_in_hex_mode(tmp_path: Path) -> None:
+    """信息行是程序生成的文本：HEX 模式只影响收发数据，TXT 里仍显示“信息”与原文。"""
+    log = SessionLog()
+    log.add(_record("rx", "A"))
+    log.add(_record("info", "提示信息", source=""))
+    target = tmp_path / "session.txt"
+
+    log.export_txt(target, hex_mode=True)
+
+    text = target.read_text(encoding="utf-8")
+    assert "[RX] COM3: 41" in text
+    assert "[信息] 提示信息" in text
+    assert "E68F90" not in text.upper()
+
+
+def test_export_csv_uses_chinese_info_label_and_keeps_info_text_in_hex_mode(
+    tmp_path: Path,
+) -> None:
+    log = SessionLog()
+    log.add(_record("tx", "A"))
+    log.add(_record("info", "提示信息", source=""))
+    target = tmp_path / "session.csv"
+
+    log.export_csv(target, hex_mode=True)
+
+    lines = target.read_text(encoding="utf-8-sig").splitlines()
+    header, data_row, info_row = lines
+    assert header == "time,direction,source,length,hex,text"
+    # 数据行在 HEX 模式下 text 留空，信息行仍保留文本。
+    assert ",TX," in data_row and data_row.endswith("41,")
+    assert "信息" in info_row
+    assert "提示信息" in info_row
+    assert "INFO" not in info_row

@@ -813,3 +813,94 @@ def test_startup_failure_subprocess_reports_and_skips_modal(tmp_path: Path) -> N
     assert app_log.read_text(encoding="utf-8") == "旧日志内容\n"
     # 启动失败被正常处理：进程没有以未捕获异常退出（没有 "Exception ignored" 之类）。
     assert "Exception ignored" not in result.stderr
+
+
+def test_smoke_test_cli_exits_zero_without_dialogs(tmp_path: Path) -> None:
+    """真实子进程冒烟：隔离 APPDATA、禁用对话框，1.5 秒后自动退出且退出码 0。"""
+    appdata = tmp_path / "appdata"
+
+    result = subprocess.run(
+        [sys.executable, "main.py", "--smoke-test"],
+        cwd=REPO_ROOT,
+        env=_selftest_env(appdata, PORTHELPER_NO_DIALOGS="1"),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    log_path = appdata / "PortHelperFluent" / "logs" / "app.log"
+    assert log_path.is_file()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "启动冒烟测试完成" in log_text
+    assert "启动冒烟检查失败" not in log_text
+
+
+class _SmokeWindow:
+    """替代真实主窗口：只记录 show/smoke_test 调用并返回预设结果。"""
+
+    def __init__(self, smoke_result: bool = True) -> None:
+        self.smoke_result = smoke_result
+        self.shown = False
+        self.smoke_calls = 0
+
+    def smoke_test(self) -> bool:
+        self.smoke_calls += 1
+        return self.smoke_result
+
+    def show(self) -> None:
+        self.shown = True
+
+
+def _run_smoke_start_gui(tmp_path: Path, monkeypatch, qapp, stub: _SmokeWindow, exec_code: int) -> int:
+    import main
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
+
+    from app.core.logging_setup import setup_logging
+    from app.services.paths import resolve_paths
+
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    logger = setup_logging(paths.log_dir)
+    monkeypatch.setattr(main, "create_main_window", lambda settings, paths: stub)
+    monkeypatch.setattr(QApplication, "exec", lambda self: exec_code)
+    # 不把 1.5 秒后的 quit 定时器留给后续测试。
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda *args, **kwargs: None))
+    from app.ui.qt_utils import uninstall_qt_message_handler
+
+    try:
+        return main._start_gui(paths, None, logger, smoke_test=True)
+    finally:
+        uninstall_qt_message_handler()
+
+
+def test_start_gui_smoke_check_failure_returns_nonzero(
+    tmp_path: Path, monkeypatch, qapp
+) -> None:
+    import main
+
+    stub = _SmokeWindow(smoke_result=False)
+
+    exit_code = _run_smoke_start_gui(tmp_path, monkeypatch, qapp, stub, exec_code=0)
+
+    assert exit_code == 2
+    assert stub.smoke_calls == 1
+    assert stub.shown is False
+    log_text = (tmp_path / "appdata" / "PortHelperFluent" / "logs" / "app.log").read_text(
+        encoding="utf-8"
+    )
+    assert "启动冒烟检查失败" in log_text
+
+
+def test_start_gui_smoke_returns_event_loop_failure_code(
+    tmp_path: Path, monkeypatch, qapp
+) -> None:
+    stub = _SmokeWindow(smoke_result=True)
+
+    exit_code = _run_smoke_start_gui(tmp_path, monkeypatch, qapp, stub, exec_code=3)
+
+    assert exit_code == 3
+    assert stub.smoke_calls == 1
+    assert stub.shown is True

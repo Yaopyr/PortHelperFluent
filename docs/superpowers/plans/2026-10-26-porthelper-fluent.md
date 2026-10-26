@@ -565,7 +565,7 @@ Step 4: Implement `app/ui/dialogs/multi_send_dialog.py`:
 - API `MultiSendDialog(worker_provider, parent)` where `worker_provider` returns the current worker; expose `to_dict()`/`from_dict()` for tests.
 
 Step 5: Tests `tests/test_serial_page.py`:
-- Inject `FakeTransport` via `SerialPage(settings, worker_factory=...)`.
+- Inject `FakeTransport` via `SerialPage(settings, paths, parent=None, *, worker_factory=...)` (constructor contract fixed in Task 2; `MainWindow` calls pages as `page(settings, paths, parent=self)`).
 - Fill port/baud, open, feed RX, assert LogPane text and counters.
 - Send text/HEX; invalid HEX shows an error and sends nothing.
 - Toggle timestamp/HEX and assert display; pause/resume; clear.

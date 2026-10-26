@@ -160,3 +160,188 @@ def test_main_window_restores_saved_geometry(qapp, tmp_path: Path) -> None:
         assert second.size().width() > 0
     finally:
         second.close()
+
+
+def test_navigation_headers_and_labels_are_in_expected_order(window) -> None:
+    from qfluentwidgets.components.navigation.navigation_widget import NavigationItemHeader
+
+    main_window, _settings, _paths = window
+
+    headers = [
+        header.text()
+        for header in main_window.navigationInterface.findChildren(NavigationItemHeader)
+    ]
+    assert headers == ["通信", "工具", "其他"]
+    labels = [
+        main_window.navigationInterface.widget(route).text() for route in PAGE_ROUTES
+    ]
+    assert labels == [
+        "串口调试",
+        "网络调试",
+        "网络服务器",
+        "USB HID",
+        "校验计算",
+        "编码转换",
+        "图片取模",
+        "点阵生成",
+        "C51 向导",
+        "设置与关于",
+    ]
+
+
+def test_close_in_no_dialogs_mode_skips_question_and_stops_workers(
+    window, qapp, monkeypatch
+) -> None:
+    main_window, settings, _paths = window
+    settings.set("ui.confirm_exit", True)
+    main_window.show()
+    qapp.processEvents()
+    monkeypatch.setenv("PORTHELPER_NO_DIALOGS", "1")
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: pytest.fail("不应弹出退出确认框")
+    )
+    stopped: list[bool] = []
+    monkeypatch.setattr(main_window, "stop_workers", lambda: stopped.append(True))
+
+    assert main_window.close() is True
+
+    assert main_window.isVisible() is False
+    assert stopped == [True]
+
+
+def test_close_cancel_keeps_window_open_and_workers_running(
+    window, qapp, monkeypatch
+) -> None:
+    main_window, settings, _paths = window
+    settings.set("ui.confirm_exit", True)
+    main_window.show()
+    qapp.processEvents()
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.No
+    )
+    stopped: list[bool] = []
+    monkeypatch.setattr(main_window, "stop_workers", lambda: stopped.append(True))
+
+    assert main_window.close() is False
+
+    assert main_window.isVisible() is True
+    assert stopped == []
+
+
+def test_close_stops_workers_even_when_question_raises(window, qapp, monkeypatch) -> None:
+    main_window, settings, _paths = window
+    settings.set("ui.confirm_exit", True)
+    main_window.show()
+    qapp.processEvents()
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+
+    def broken_question(*args, **kwargs):
+        raise RuntimeError("确认框创建失败")
+
+    monkeypatch.setattr(QMessageBox, "question", broken_question)
+    stopped: list[bool] = []
+    monkeypatch.setattr(main_window, "stop_workers", lambda: stopped.append(True))
+
+    assert main_window.close() is True
+
+    assert main_window.isVisible() is False
+    assert stopped == [True]
+
+
+def test_smoke_mode_skips_close_confirmation_and_geometry_persistence(
+    window, qapp, monkeypatch
+) -> None:
+    main_window, settings, _paths = window
+    assert main_window.smoke_test() is True
+    settings.set("ui.confirm_exit", True)
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: pytest.fail("冒烟模式不应弹确认框")
+    )
+    before = settings.get("ui.window_geometry")
+    main_window.show()
+    qapp.processEvents()
+
+    assert main_window.close() is True
+
+    assert main_window.isVisible() is False
+    assert settings.get("ui.window_geometry") == before
+
+
+def test_page_construction_contract_settings_paths_and_keyword_parent(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    """Task 3+ 页面统一以 (settings, paths, parent=self) 构造。"""
+    import app.ui.main_window as main_window_module
+
+    received: list[tuple] = []
+
+    class ContractPage(QWidget):
+        def __init__(self, settings, paths, parent=None, **kwargs) -> None:
+            super().__init__(parent)
+            self.setObjectName("serial")
+            received.append((settings, paths, parent, kwargs))
+
+        def has_active_work(self) -> bool:
+            return False
+
+        def stop_workers(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_window_module,
+        "_PAGE_SPECS",
+        (("通信", (("serial", ContractPage, "CONNECT", "串口调试"),)),),
+    )
+    monkeypatch.setattr(main_window_module, "PAGE_ROUTES", ("serial",))
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    settings = Settings(paths.config_file)
+    settings.load()
+
+    main_window = main_window_module.MainWindow(settings, paths)
+    try:
+        assert received == [(settings, paths, main_window, {})]
+        assert main_window.smoke_test() is True
+    finally:
+        settings.set("ui.confirm_exit", False)
+        main_window.close()
+
+
+def test_placeholder_and_serial_page_signatures_accept_worker_factory(window) -> None:
+    import inspect
+
+    from app.ui.pages.serial_page import SerialPage
+
+    _main_window, settings, paths = window
+    signature = inspect.signature(SerialPage.__init__)
+    parameters = signature.parameters
+    assert list(parameters)[1:4] == ["settings", "paths", "parent"]
+    assert parameters["parent"].default is None
+    assert parameters["worker_factory"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["worker_factory"].default is None
+    assert any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+    fake_factory = object()
+    page = SerialPage(settings, paths, parent=None, worker_factory=fake_factory)
+    try:
+        assert page.worker_factory is fake_factory
+        assert page.settings is settings
+        assert page.paths is paths
+    finally:
+        page.close()
+
+
+def test_app_version_has_single_source(window) -> None:
+    import app
+    import main
+    from app.core.settings import DEFAULT_SETTINGS
+
+    main_window, _settings, _paths = window
+
+    assert app.APP_VERSION == main.APP_VERSION == DEFAULT_SETTINGS["app.version"] == "1.0.0"
+    assert main_window.windowTitle() == f"{APP_TITLE} {app.APP_VERSION}"

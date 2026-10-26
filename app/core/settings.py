@@ -10,8 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app import APP_VERSION
+
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "app.version": "1.0.0",
+    "app.version": APP_VERSION,
     "ui.theme": "auto",
     "ui.accent": "#0A84FF",
     "ui.window_geometry": "",

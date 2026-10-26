@@ -9,6 +9,7 @@ from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QWidget
 from qfluentwidgets import FluentIcon, LineEdit, ToolButton
 
+from app.core.logging_setup import get_logger
 from app.ui.qt_utils import safe_slot
 
 
@@ -55,18 +56,27 @@ class FilePicker(QWidget):
         self.line_edit.setText(str(path))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if _single_local_file(event) is not None:
-            event.acceptProposedAction()
-        else:
+        try:
+            if _single_local_file(event) is not None:
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+        except Exception:
+            # 拖放事件来自外部程序，任何解析异常都不能抛回 Qt 事件循环。
+            get_logger().exception("处理文件拖入失败")
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        path = _single_local_file(event)
-        if path is None:
+        try:
+            path = _single_local_file(event)
+            if path is None:
+                event.ignore()
+                return
+            self.set_path(path)
+            event.acceptProposedAction()
+        except Exception:
+            get_logger().exception("处理文件拖放失败")
             event.ignore()
-            return
-        self.set_path(path)
-        event.acceptProposedAction()
 
     @safe_slot
     def _browse(self) -> None:
@@ -83,14 +93,18 @@ class FilePicker(QWidget):
 
 
 def _single_local_file(event: QDragEnterEvent | QDropEvent) -> str | None:
-    """只接受恰好一个本地文件；多文件、目录与远程 URL 一律忽略。"""
+    """只接受恰好一个本地文件路径；多文件、目录与远程 URL 一律忽略。
+
+    这里刻意不做 ``is_file()`` 之类的磁盘探测：拖放回调运行在 GUI 线程，网络盘或
+    已断开的共享路径可能长时间阻塞。路径是否可用由真正读取文件的操作去校验。
+    """
     mime = event.mimeData()
     if not mime.hasUrls():
         return None
     urls = mime.urls()
     if len(urls) != 1 or not urls[0].isLocalFile():
         return None
-    path = Path(urls[0].toLocalFile())
-    if not path.is_file():
+    local_path = urls[0].toLocalFile().strip()
+    if not local_path or local_path.endswith(("/", "\\")):
         return None
-    return str(path)
+    return str(Path(local_path))

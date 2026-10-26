@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 from PyQt6.QtCore import QByteArray
 from PyQt6.QtWidgets import QMessageBox, QWidget
 from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
 
+from app import APP_VERSION
 from app.core.logging_setup import get_logger
 from app.core.settings import Settings
 from app.services.paths import AppPaths
@@ -22,7 +25,8 @@ from app.ui.pages.settings_page import SettingsPage
 from app.ui.theme import apply_theme, enable_mica as enable_window_mica
 
 APP_TITLE = "PortHelper Fluent"
-DEFAULT_VERSION = "1.0.0"
+# 与 main.NO_DIALOGS_ENV 同一语义：无界面/自动测试环境不弹任何模态框。
+NO_DIALOGS_ENV = "PORTHELPER_NO_DIALOGS"
 
 # (分组标题, ((路由, 页面类, 图标名, 导航文字), ...))
 _PAGE_SPECS = (
@@ -76,10 +80,11 @@ class MainWindow(FluentWindow):
         super().__init__(parent)
         self._settings = settings
         self._paths = paths
+        self._smoke_mode = False
         self.pages: dict[str, QWidget] = {}
 
         self.setObjectName("mainWindow")
-        self.setWindowTitle(f"{APP_TITLE} {DEFAULT_VERSION}")
+        self.setWindowTitle(f"{APP_TITLE} {APP_VERSION}")
         self.setMinimumSize(1180, 760)
         self.resize(1280, 820)
         self._restore_geometry()
@@ -95,6 +100,9 @@ class MainWindow(FluentWindow):
         for header, specs in _PAGE_SPECS:
             self.navigationInterface.addItemHeader(header, NavigationItemPosition.TOP)
             for route, page_class, icon_name, text in specs:
+                # 页面构造契约（Task 3+ 必须保持）：
+                #   page(settings, paths, parent=self)
+                # 具体页面可追加关键字参数（如 SerialPage 的 worker_factory）。
                 page = page_class(self._settings, self._paths, parent=self)
                 self.pages[route] = page
                 setattr(self, f"{route.replace('-', '_')}_page", page)
@@ -163,24 +171,71 @@ class MainWindow(FluentWindow):
                 get_logger().exception("停止页面后台任务失败：%s", page.objectName())
 
     def closeEvent(self, event) -> None:
+        """退出前确认并停止后台任务；确认失败也必须清理，取消则保持窗口打开。"""
+        should_close = True
         try:
-            if self.has_active_work() and bool(self._settings.get("ui.confirm_exit", True)):
-                answer = QMessageBox.question(
-                    self,
-                    "退出确认",
-                    "仍有连接或监听正在进行，退出会断开它们。确定要退出吗？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    event.ignore()
-                    return
-            self.stop_workers()
+            should_close = self._confirm_close()
         except Exception:
-            get_logger().exception("退出前清理页面失败")
-        self._save_geometry()
+            # 确认流程本身出错不能把窗口卡死：按用户同意退出处理。
+            get_logger().exception("退出确认失败，按直接退出处理")
+            should_close = True
+        finally:
+            if should_close:
+                self._stop_workers_logged()
+        if not should_close:
+            event.ignore()
+            return
+        if not self._smoke_mode:
+            self._save_geometry()
         super().closeEvent(event)
 
+    def _confirm_close(self) -> bool:
+        """返回是否允许关闭；冒烟模式/无对话框环境直接允许。"""
+        if self._smoke_mode:
+            return True
+        if not self.has_active_work():
+            return True
+        if not bool(self._settings.get("ui.confirm_exit", True)):
+            return True
+        if not _dialogs_enabled():
+            get_logger().warning("已设置 %s，跳过退出确认并停止后台任务", NO_DIALOGS_ENV)
+            return True
+        try:
+            answer = QMessageBox.question(
+                self,
+                "退出确认",
+                "仍有连接或监听正在进行，退出会断开它们。确定要退出吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        except Exception:
+            # 测试/无界面环境下模态框可能无法创建：按确认退出处理，
+            # 但仍会走 stop_workers()，绝不跳过后台清理。
+            get_logger().exception("退出确认对话框失败，按确认退出处理")
+            return True
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _stop_workers_logged(self) -> None:
+        try:
+            self.stop_workers()
+        except Exception:
+            get_logger().exception("退出前停止页面后台任务失败")
+
     def smoke_test(self) -> bool:
-        """启动冒烟检查：构造成功后返回 True，供 `main.py --smoke-test` 使用。"""
-        return True
+        """启动冒烟检查：标记冒烟模式并确认页面/导航装配完整。
+
+        冒烟模式关闭退出确认与窗口几何保存，避免自动化运行改动用户配置。
+        """
+        self._smoke_mode = True
+        try:
+            expected = len(PAGE_ROUTES)
+            return len(self.pages) == expected and self.stackedWidget.count() == expected
+        except Exception:
+            get_logger().exception("启动冒烟检查失败")
+            return False
+
+
+def _dialogs_enabled() -> bool:
+    """`PORTHELPER_NO_DIALOGS=1` 时禁用模态框（与 main._dialogs_enabled 同语义）。"""
+    value = os.environ.get(NO_DIALOGS_ENV, "").strip().lower()
+    return value not in ("1", "true", "yes", "on")

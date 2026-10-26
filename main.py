@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from app import APP_VERSION
 from app.core.logging_setup import (
     LOG_FILE_NAME,
     get_logger,
@@ -24,7 +25,7 @@ from app.core.logging_setup import (
     setup_logging,
     write_crash_report,
 )
-from app.core.settings import DEFAULT_SETTINGS, Settings
+from app.core.settings import Settings
 from app.services.exports import write_text_atomic
 from app.services.paths import AppPaths, ensure_writable_paths, probe_write, resolve_paths
 
@@ -32,7 +33,6 @@ if TYPE_CHECKING:
     from PyQt6.QtWidgets import QWidget
 
 APP_TITLE = "PortHelper Fluent"
-APP_VERSION = str(DEFAULT_SETTINGS["app.version"])
 BINDING_FAILURE_HINT = "qfluentwidgets 当前不是 PyQt6 版本"
 # 置为 1 时只写日志、不弹任何模态框，供无界面测试/子进程使用。
 NO_DIALOGS_ENV = "PORTHELPER_NO_DIALOGS"
@@ -286,6 +286,9 @@ def _start_gui(
         return _handle_binding_failure(exc, paths.log_dir)
 
     window = create_main_window(settings, paths)
+    if smoke_test and not window.smoke_test():
+        logger.error("启动冒烟检查失败：主窗口页面未完整装配")
+        return 2
     window.show()
     # 模态提示会阻塞 --smoke-test 的自动退出，冒烟模式只写日志。
     if portable_warning and _dialogs_enabled() and not smoke_test:
@@ -297,10 +300,12 @@ def _start_gui(
 
         QTimer.singleShot(1500, app.quit)
     exit_code = app.exec()
+    if exit_code != 0:
+        logger.error("事件循环异常退出：%s", exit_code)
+        return exit_code
     if smoke_test:
         logger.info("启动冒烟测试完成")
-        return 0
-    return exit_code
+    return 0 if smoke_test else exit_code
 
 
 def _binding_failure_message(exc: BaseException) -> str:

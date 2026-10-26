@@ -20,16 +20,17 @@ from PyQt6.QtWidgets import (
 from qfluentwidgets import CaptionLabel, PrimaryPushButton, PushButton
 
 from app.core.encoding import decode_bytes, to_hex
-from app.services.session_log import SessionLog
+from app.services.session_log import SessionLog, direction_label
 from app.ui.feedback import show_success
 from app.ui.qt_utils import safe_slot
 
 ROW_CAP = 5000
 _COLUMNS = ("时间", "方向", "来源", "长度", "HEX", "文本")
+_COLUMN_WIDTHS = (180, 70, 120, 80)
 
 
 class SessionDialog(QDialog):
-    """展示 `SessionLog` 的最近快照；导出始终包含完整记录。"""
+    """展示并导出 `SessionLog` 快照（最近 ROW_CAP 条，与表格所见一致）。"""
 
     def __init__(
         self,
@@ -37,10 +38,13 @@ class SessionDialog(QDialog):
         parent: QWidget | None = None,
         *,
         codec: str = "utf-8",
+        default_export_dir: str | Path | None = None,
     ) -> None:
         super().__init__(parent)
-        self._session = session
         self._codec = codec or "utf-8"
+        self._default_export_dir = (
+            Path(default_export_dir) if default_export_dir is not None else None
+        )
 
         self.setObjectName("sessionDialog")
         self.setWindowTitle("会话记录")
@@ -52,6 +56,7 @@ class SessionDialog(QDialog):
 
         records = session.records()
         shown = records[-ROW_CAP:]
+        self._snapshot = _snapshot_log(shown)
         self.cap_label = CaptionLabel(self._cap_text(len(records), len(shown)), self)
         layout.addWidget(self.cap_label)
 
@@ -63,8 +68,10 @@ class SessionDialog(QDialog):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         header = self.table.horizontalHeader()
-        for column in range(4):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        # 数据列用 Interactive：5000 行时逐行 ResizeToContents 会明显卡顿。
+        for column, width in enumerate(_COLUMN_WIDTHS):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            header.resizeSection(column, width)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.setUpdatesEnabled(False)
@@ -92,17 +99,15 @@ class SessionDialog(QDialog):
         if total > shown:
             return (
                 f"共 {total} 条记录，表格显示最近 {shown} 条（上限 {ROW_CAP} 条）；"
-                "导出文件包含全部记录。"
+                f"导出文件包含当前显示的 {shown} 条记录。"
             )
-        return f"共 {total} 条记录，导出文件包含全部记录。"
+        return f"共 {total} 条记录，导出文件包含当前显示的记录。"
 
     def _fill_table(self, records) -> None:
         for row, record in enumerate(records):
             values = (
                 _format_time(record),
-                {"rx": "RX", "tx": "TX", "info": "信息"}.get(
-                    record.direction, record.direction.upper()
-                ),
+                direction_label(record.direction),
                 record.source,
                 str(len(record.data)),
                 to_hex(record.data),
@@ -129,7 +134,7 @@ class SessionDialog(QDialog):
         path = self._ask_path("CSV 文件 (*.csv)", ".csv")
         if path is None:
             return
-        self._session.export_csv(path, codec=self._codec)
+        self._snapshot.export_csv(path, codec=self._codec)
         show_success(self, "已导出", str(path))
 
     @safe_slot
@@ -137,13 +142,17 @@ class SessionDialog(QDialog):
         path = self._ask_path("文本文件 (*.txt)", ".txt")
         if path is None:
             return
-        self._session.export_txt(path, codec=self._codec)
+        self._snapshot.export_txt(path, codec=self._codec)
         show_success(self, "已导出", str(path))
 
     def _ask_path(self, filter_text: str, suffix: str) -> Path | None:
         default_name = f"session-{datetime.now():%Y%m%d-%H%M%S}{suffix}"
+        if self._default_export_dir is not None:
+            default_path = self._default_export_dir / default_name
+        else:
+            default_path = default_name
         path_text, _selected = QFileDialog.getSaveFileName(
-            self, "导出会话记录", default_name, filter_text
+            self, "导出会话记录", str(default_path), filter_text
         )
         if not path_text:
             return None
@@ -151,6 +160,18 @@ class SessionDialog(QDialog):
         if path.suffix.lower() != suffix:
             path = path.with_suffix(suffix)
         return path
+
+
+def _snapshot_log(records) -> SessionLog:
+    """把表格快照复制成独立 SessionLog；导出只包含用户当前看到的内容。"""
+    total_bytes = sum(len(record.data) for record in records)
+    snapshot = SessionLog(
+        max_bytes=max(total_bytes, 1),
+        max_records=max(len(records), 1),
+    )
+    for record in records:
+        snapshot.add(record)
+    return snapshot
 
 
 def _format_time(record) -> str:

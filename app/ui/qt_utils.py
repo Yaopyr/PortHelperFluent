@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import threading
 import time
@@ -125,12 +126,24 @@ def safe_slot(func: Callable[..., Any]) -> Callable[..., Any]:
 
     PyQt6 遇到未捕获的槽异常会直接中止进程，因此所有连接到信号的槽都必须经过
     这里（或自行捕获全部异常）。父窗口取第一个位置参数（QWidget 实例）。
+
+    Qt 的 ``clicked`` 等信号会附加 ``checked`` 等参数，而无参槽不应因此变成
+    ``TypeError``。装饰时按被包装函数的签名算出可接受的位置参数上限：多余的尾部
+    位置参数在调用前被裁掉，``*args`` 函数保持原样；绑定方法的签名不含 ``self``，
+    类内方法（装饰时仍是未绑定函数）的签名含 ``self``，两种形式都按实际参数个数
+    正确处理。裁剪只发生在调用前，函数体内部抛出的 ``TypeError`` 仍会进入统一的
+    错误反馈，不会被误当成参数数量问题吞掉。
     """
+
+    max_positional = _max_positional_args(func)
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        call_args = args
+        if max_positional is not None and len(call_args) > max_positional:
+            call_args = call_args[:max_positional]
         try:
-            return func(*args, **kwargs)
+            return func(*call_args, **kwargs)
         except Exception as exc:
             try:
                 logging.getLogger("porthelper").exception("slot failed")
@@ -156,6 +169,22 @@ def safe_slot(func: Callable[..., Any]) -> Callable[..., Any]:
             return None
 
     return wrapper
+
+
+def _max_positional_args(func: Callable[..., Any]) -> int | None:
+    """返回函数可接受的位置参数个数；有 ``*args`` 或签名不可读时返回 None。"""
+    try:
+        parameters = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+        return None
+    return sum(
+        1
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
 
 
 def readable_message(exc: BaseException) -> str:
