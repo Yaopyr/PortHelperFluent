@@ -10,6 +10,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import logging
 import os
 import platform
 import sys
@@ -25,7 +26,7 @@ from app.core.logging_setup import (
 )
 from app.core.settings import DEFAULT_SETTINGS, Settings
 from app.services.exports import write_text_atomic
-from app.services.paths import ensure_writable_paths, resolve_paths
+from app.services.paths import AppPaths, ensure_writable_paths, resolve_paths
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QWidget
@@ -43,6 +44,10 @@ REQUIRED_MODULES = (
     "hid",
     "qrcode",
 )
+
+# 异常提示桥接与类型都延迟创建，保证缺少 PyQt6 时 main 仍可导入（--selftest 依赖）。
+_ERROR_BRIDGE: object | None = None
+_ERROR_BRIDGE_TYPE: type | None = None
 
 
 def check_fluent_binding() -> None:
@@ -161,12 +166,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _run_gui() -> int:
+    """解析生效路径后启动界面；启动失败时把生效路径交给启动失败处理。"""
     paths, portable_warning = ensure_writable_paths(resolve_paths())
     logger = setup_logging(paths.log_dir)
-    install_exception_hooks(paths.log_dir, on_error=_show_error_dialog)
-    if portable_warning:
-        logger.warning(portable_warning)
+    # QApplication 还没创建：钩子只写日志与崩溃报告，不触碰任何 Qt 控件。
+    # `_start_gui` 在 QApplication 就绪后会换成排队到 GUI 线程的错误提示回调。
+    install_exception_hooks(paths.log_dir)
+    try:
+        return _start_gui(paths, portable_warning, logger)
+    except Exception as exc:
+        # 必须传生效路径：便携目录不可写时崩溃报告要落在 AppData 回退目录。
+        _handle_startup_failure(exc, paths)
+        return 1
 
+
+def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Logger) -> int:
+    """在已解析的生效路径上创建 QApplication 与主窗口。"""
     settings = Settings(paths.config_file)
     settings.load()
     if settings.warning:
@@ -183,6 +198,12 @@ def _run_gui() -> int:
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_TITLE)
+
+    # QApplication 就绪后换成桥接回调：错误提示经信号排队到 GUI 线程，
+    # 子线程触发 threading.excepthook 时不会直接创建 QMessageBox。
+    install_exception_hooks(paths.log_dir, on_error=_create_error_callback())
+    if portable_warning:
+        logger.warning(portable_warning)
 
     # 必须在创建 FluentWindow 之前确认绑定，PyQt5 版本会造成白屏。
     try:
@@ -253,12 +274,52 @@ def _show_warning_dialog(message: str) -> None:
     QMessageBox.warning(None, "PortHelper Fluent 提示", message)
 
 
-def _handle_startup_failure(exc: BaseException) -> None:
+def _error_bridge_class() -> type:
+    """延迟定义 QObject 子类：缺少 PyQt6 时 main 模块仍可导入。"""
+    global _ERROR_BRIDGE_TYPE
+    if _ERROR_BRIDGE_TYPE is None:
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class _ErrorBridge(QObject):
+            """把异常提示排队到 GUI 线程，避免子线程直接创建 QMessageBox。"""
+
+            show_error = pyqtSignal(str)
+
+        _ERROR_BRIDGE_TYPE = _ErrorBridge
+    return _ERROR_BRIDGE_TYPE
+
+
+def _create_error_callback() -> Callable[[str], None] | None:
+    """创建异常提示桥接，返回可跨线程调用的 `on_error`；没有 QApplication 时返回 None。
+
+    `show_error` 用 `Qt.ConnectionType.QueuedConnection` 连接到 `_show_error_dialog`：
+    `threading.excepthook` 在子线程触发时只发出信号，真正的 `QMessageBox` 由 GUI
+    线程创建。QApplication 尚未创建时返回 None，异常钩子仅写日志与崩溃报告，
+    不触碰任何 Qt 控件。
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication
+
+    if QApplication.instance() is None:
+        return None
+
+    global _ERROR_BRIDGE
+    bridge = _error_bridge_class()()
+    bridge.show_error.connect(_show_error_dialog, Qt.ConnectionType.QueuedConnection)
+    _ERROR_BRIDGE = bridge  # 保持引用，避免 QObject 在信号投递前被回收
+    return bridge.show_error.emit
+
+
+def _handle_startup_failure(exc: BaseException, paths: AppPaths | None = None) -> None:
+    """写崩溃报告与日志、弹框说明原因。
+
+    `paths` 是启动时实际生效的路径（例如已回退到 AppData 的目录）；只有生效路径
+    尚未解析出来时才退回 `resolve_paths()`，避免把报告写进不可写的便携目录。
+    """
+    log_dir = paths.log_dir if paths is not None else resolve_paths().log_dir
     report_path: Path | None = None
     try:
-        report_path = write_crash_report(
-            resolve_paths().log_dir, type(exc), exc, exc.__traceback__
-        )
+        report_path = write_crash_report(log_dir, type(exc), exc, exc.__traceback__)
     except Exception:
         report_path = None
     try:

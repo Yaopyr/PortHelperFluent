@@ -2,7 +2,8 @@
 
 非便携模式下所有可写数据都放在 `%APPDATA%\\PortHelperFluent`，绝不写入程序
 所在目录（通常是 `Program Files`）；只有显式放置 `portable.flag` 时才启用便携模式。
-便携目录创建或写入失败时回退到 AppData，并通过 `ensure_writable_paths` 返回中文提示。
+`ensure_dirs` 只负责“创建目录或抛错”；便携目录创建或写入失败时的 AppData 回退
+集中在 `ensure_writable_paths`，并由它返回中文提示。
 """
 
 from __future__ import annotations
@@ -66,40 +67,46 @@ def resolve_paths(exe_path: Path | None = None, appdata: Path | None = None) -> 
     return _appdata_paths(exe_dir, appdata)
 
 
+def ensure_dirs(paths: AppPaths) -> None:
+    """创建数据目录与日志目录；失败时原样抛出 `OSError`，不做任何回退。"""
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    paths.log_dir.mkdir(parents=True, exist_ok=True)
+
+
 def ensure_writable_paths(
     paths: AppPaths, appdata: Path | None = None
 ) -> tuple[AppPaths, str | None]:
     """创建并验证数据目录与日志目录，便携模式不可写时回退到 AppData。
 
     返回实际生效的 `AppPaths` 与中文回退提示（未回退时为 None）。
-    非便携模式下 AppData 本身就不可写，异常会原样抛出，不做无意义的二次尝试。
+    回退目录同样要创建并实际写一次探针文件；便携目录与 AppData 都不可写时抛出
+    中文 `OSError`，绝不返回一个稍后才失败的路径。
+    非便携模式下 AppData 本身就不可写，原始异常原样抛出，不做无意义的二次尝试。
     """
     try:
-        _mkdirs(paths)
+        ensure_dirs(paths)
         _probe_write(paths.data_dir)
         _probe_write(paths.log_dir)
     except OSError as exc:
         if not paths.portable:
             raise
         fallback = _appdata_paths(paths.exe_dir, appdata)
-        _mkdirs(fallback)  # AppData 也不可写时让异常向上抛出，由启动失败流程处理
+        try:
+            ensure_dirs(fallback)
+            _probe_write(fallback.data_dir)
+            _probe_write(fallback.log_dir)
+        except OSError as fallback_exc:
+            raise OSError(
+                "便携模式数据目录与 AppData 回退目录都不可写："
+                f"{paths.data_dir}（{exc}）；{fallback.data_dir}（{fallback_exc}）。"
+                "请检查目录权限，或改用有写入权限的账户运行。"
+            ) from fallback_exc
         warning = (
             f"便携模式数据目录不可写（{exc}），已回退到 AppData：{fallback.data_dir}。"
             "配置文件与会话日志将保存在该目录。"
         )
         return fallback, warning
     return paths, None
-
-
-def ensure_dirs(paths: AppPaths, appdata: Path | None = None) -> AppPaths:
-    """兼容入口：确保目录存在并返回实际生效的路径；需要回退提示时请用 `ensure_writable_paths`。"""
-    effective, _warning = ensure_writable_paths(paths, appdata=appdata)
-    return effective
-
-
-def _mkdirs(paths: AppPaths) -> None:
-    paths.data_dir.mkdir(parents=True, exist_ok=True)
-    paths.log_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _probe_write(directory: Path) -> None:
