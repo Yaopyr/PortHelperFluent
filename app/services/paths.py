@@ -2,7 +2,7 @@
 
 非便携模式下所有可写数据都放在 `%APPDATA%\\PortHelperFluent`，绝不写入程序
 所在目录（通常是 `Program Files`）；只有显式放置 `portable.flag` 时才启用便携模式。
-便携目录创建失败时回退到 AppData，并通过 `ensure_writable_paths` 返回中文提示。
+便携目录创建或写入失败时回退到 AppData，并通过 `ensure_writable_paths` 返回中文提示。
 """
 
 from __future__ import annotations
@@ -69,13 +69,15 @@ def resolve_paths(exe_path: Path | None = None, appdata: Path | None = None) -> 
 def ensure_writable_paths(
     paths: AppPaths, appdata: Path | None = None
 ) -> tuple[AppPaths, str | None]:
-    """创建数据目录与日志目录，便携模式失败时回退到 AppData。
+    """创建并验证数据目录与日志目录，便携模式不可写时回退到 AppData。
 
     返回实际生效的 `AppPaths` 与中文回退提示（未回退时为 None）。
     非便携模式下 AppData 本身就不可写，异常会原样抛出，不做无意义的二次尝试。
     """
     try:
         _mkdirs(paths)
+        _probe_write(paths.data_dir)
+        _probe_write(paths.log_dir)
     except OSError as exc:
         if not paths.portable:
             raise
@@ -98,3 +100,17 @@ def ensure_dirs(paths: AppPaths, appdata: Path | None = None) -> AppPaths:
 def _mkdirs(paths: AppPaths) -> None:
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _probe_write(directory: Path) -> None:
+    """在目录内写入一个带 PID 的临时探针文件并删除，确认目录真实可写。
+
+    仅靠 `mkdir(exist_ok=True)` 无法发现“目录已存在但只读”的情况，因此必须实际
+    写一次文件。无论成功与否都在 `finally` 中清理，不留下残留文件。
+    """
+    probe = directory / f".porthelper-write-probe-{os.getpid()}.probe"
+    try:
+        with probe.open("wb") as handle:
+            handle.write(b"0")
+    finally:
+        probe.unlink(missing_ok=True)

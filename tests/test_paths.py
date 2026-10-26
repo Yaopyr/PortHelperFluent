@@ -72,6 +72,40 @@ def test_ensure_dirs_creates_data_and_log_dirs(tmp_path: Path) -> None:
     assert effective == paths
     assert paths.data_dir.is_dir()
     assert paths.log_dir.is_dir()
+    # 可写性探针文件必须自行清理，成功路径上不允许残留。
+    assert list(paths.data_dir.glob("*.probe")) == []
+    assert list(paths.log_dir.glob("*.probe")) == []
+
+
+def test_portable_existing_readonly_dirs_fall_back_to_appdata(tmp_path: Path, monkeypatch) -> None:
+    exe_dir = _make_exe_dir(tmp_path)
+    (exe_dir / "portable.flag").write_text("1", encoding="utf-8")
+    (exe_dir / "data" / "logs").mkdir(parents=True)  # 目录已存在，mkdir 会静默成功
+    appdata = tmp_path / "roaming"
+    paths = resolve_paths(exe_path=exe_dir, appdata=appdata)
+    original_open = Path.open
+
+    def fake_open(self: Path, *args, **kwargs):
+        if self.suffix == ".probe":
+            raise PermissionError(13, "拒绝访问", str(self))
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    effective, warning = ensure_writable_paths(paths, appdata=appdata)
+
+    assert effective.portable is False
+    assert effective.data_dir == appdata / APP_NAME
+    assert effective.config_file == appdata / APP_NAME / "config.json"
+    assert effective.log_dir == appdata / APP_NAME / "logs"
+    assert effective.data_dir.is_dir()
+    assert effective.log_dir.is_dir()
+    assert warning
+    assert "便携" in warning
+    assert "AppData" in warning
+    assert str(appdata / APP_NAME) in warning
+    assert list(paths.data_dir.glob("*.probe")) == []
+    assert list(paths.log_dir.glob("*.probe")) == []
 
 
 def test_portable_dir_failure_falls_back_to_appdata(tmp_path: Path, monkeypatch) -> None:
