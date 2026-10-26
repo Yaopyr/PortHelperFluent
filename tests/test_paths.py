@@ -1,7 +1,9 @@
 import sys
 from pathlib import Path
 
-from app.services.paths import APP_NAME, ensure_dirs, resolve_paths
+import pytest
+
+from app.services.paths import APP_NAME, ensure_dirs, ensure_writable_paths, resolve_paths
 
 
 def _make_exe_dir(tmp_path: Path) -> Path:
@@ -65,7 +67,53 @@ def test_default_exe_dir_follows_sys_executable_when_frozen(tmp_path: Path, monk
 def test_ensure_dirs_creates_data_and_log_dirs(tmp_path: Path) -> None:
     paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "roaming")
 
-    ensure_dirs(paths)
+    effective = ensure_dirs(paths)
 
+    assert effective == paths
     assert paths.data_dir.is_dir()
     assert paths.log_dir.is_dir()
+
+
+def test_portable_dir_failure_falls_back_to_appdata(tmp_path: Path, monkeypatch) -> None:
+    exe_dir = _make_exe_dir(tmp_path)
+    (exe_dir / "portable.flag").write_text("1", encoding="utf-8")
+    appdata = tmp_path / "roaming"
+    paths = resolve_paths(exe_path=exe_dir, appdata=appdata)
+    original_mkdir = Path.mkdir
+
+    def fake_mkdir(self: Path, *args, **kwargs) -> None:
+        if self == paths.data_dir:
+            raise PermissionError(13, "拒绝访问", str(self))
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+
+    effective, warning = ensure_writable_paths(paths, appdata=appdata)
+
+    assert effective.portable is False
+    assert effective.data_dir == appdata / APP_NAME
+    assert effective.config_file == appdata / APP_NAME / "config.json"
+    assert effective.log_dir == appdata / APP_NAME / "logs"
+    assert effective.data_dir.is_dir()
+    assert effective.log_dir.is_dir()
+    assert warning
+    assert "便携" in warning
+    assert "AppData" in warning
+    assert str(appdata / APP_NAME) in warning
+    assert not paths.data_dir.exists()
+
+
+def test_non_portable_dir_failure_propagates(tmp_path: Path, monkeypatch) -> None:
+    appdata = tmp_path / "roaming"
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=appdata)
+    original_mkdir = Path.mkdir
+
+    def fake_mkdir(self: Path, *args, **kwargs) -> None:
+        if self == paths.data_dir:
+            raise PermissionError(13, "拒绝访问", str(self))
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+
+    with pytest.raises(PermissionError):
+        ensure_writable_paths(paths)

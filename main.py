@@ -25,13 +25,14 @@ from app.core.logging_setup import (
 )
 from app.core.settings import DEFAULT_SETTINGS, Settings
 from app.services.exports import write_text_atomic
-from app.services.paths import ensure_dirs, resolve_paths
+from app.services.paths import ensure_writable_paths, resolve_paths
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QWidget
 
 APP_TITLE = "PortHelper Fluent"
 APP_VERSION = str(DEFAULT_SETTINGS["app.version"])
+BINDING_FAILURE_HINT = "qfluentwidgets 当前不是 PyQt6 版本"
 REQUIRED_MODULES = (
     "PyQt6",
     "qfluentwidgets",
@@ -50,7 +51,7 @@ def check_fluent_binding() -> None:
     from qfluentwidgets import FluentWindow
 
     if not issubclass(FluentWindow, QWidget):
-        raise RuntimeError("qfluentwidgets 当前不是 PyQt6 版本")
+        raise RuntimeError(BINDING_FAILURE_HINT)
 
 
 def build_placeholder_window() -> "QWidget":
@@ -109,8 +110,9 @@ def run_selftest(report_path: Path | None = None) -> int:
         errors.append(f"Qt 绑定自检失败：{exc}")
 
     try:
-        paths = resolve_paths()
-        ensure_dirs(paths)
+        paths, portable_warning = ensure_writable_paths(resolve_paths())
+        if portable_warning:
+            get_logger().warning(portable_warning)
         _check_writable(paths.data_dir)
         _check_writable(paths.log_dir)
     except Exception as exc:
@@ -159,10 +161,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def _run_gui() -> int:
-    paths = resolve_paths()
-    ensure_dirs(paths)
+    paths, portable_warning = ensure_writable_paths(resolve_paths())
     logger = setup_logging(paths.log_dir)
     install_exception_hooks(paths.log_dir, on_error=_show_error_dialog)
+    if portable_warning:
+        logger.warning(portable_warning)
 
     settings = Settings(paths.config_file)
     settings.load()
@@ -181,10 +184,57 @@ def _run_gui() -> int:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_TITLE)
 
+    # 必须在创建 FluentWindow 之前确认绑定，PyQt5 版本会造成白屏。
+    try:
+        check_fluent_binding()
+    except Exception as exc:
+        return _handle_binding_failure(exc, paths.log_dir)
+
     window = create_main_window(settings)
     window.show()
+    if portable_warning:
+        _show_warning_dialog(portable_warning)
     logger.info("%s %s 已启动，数据目录：%s", APP_TITLE, APP_VERSION, paths.data_dir)
     return app.exec()
+
+
+def _binding_failure_message(exc: BaseException) -> str:
+    if isinstance(exc, ImportError):
+        summary = f"启动自检失败：无法导入 qfluentwidgets（{exc.name or exc}）"
+        cause = "可能原因：PyQt6 或 qfluentwidgets 未安装，或安装不完整。"
+        action = "下一步：执行 pip install -r requirements.txt 重新安装依赖。"
+    else:
+        summary = f"启动自检失败：{BINDING_FAILURE_HINT}"
+        cause = (
+            "可能原因：qfluentwidgets 被 PyQt5-Fluent-Widgets 覆盖，实际绑定到了 PyQt5，"
+            "继续启动会出现空白窗口。"
+        )
+        action = (
+            "下一步：卸载 PyQt5-Fluent-Widgets 后重新安装 PyQt6-Fluent-Widgets，"
+            "再执行 pip install -r requirements.txt。"
+        )
+    return f"{summary}。\n\n{cause}\n\n{action}\n\n技术细节：{exc}"
+
+
+def _handle_binding_failure(exc: BaseException, log_dir: Path) -> int:
+    """处理 Qt 绑定自检失败：写崩溃报告与日志、弹框说明原因，返回退出码 1。"""
+    message = _binding_failure_message(exc)
+    report_path: Path | None = None
+    try:
+        report_path = write_crash_report(log_dir, type(exc), exc, exc.__traceback__)
+    except Exception:
+        report_path = None
+    try:
+        get_logger().critical("Qt 绑定自检失败：%s", message)
+    except Exception:
+        pass
+    if report_path is not None:
+        message += f"\n\n崩溃报告已保存到：{report_path}"
+    try:
+        _show_error_dialog(message)
+    except Exception:
+        pass
+    return 1
 
 
 def _show_error_dialog(message: str) -> None:
@@ -193,6 +243,14 @@ def _show_error_dialog(message: str) -> None:
     if QApplication.instance() is None:
         return
     QMessageBox.critical(None, "PortHelper Fluent 错误", message)
+
+
+def _show_warning_dialog(message: str) -> None:
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+
+    if QApplication.instance() is None:
+        return
+    QMessageBox.warning(None, "PortHelper Fluent 提示", message)
 
 
 def _handle_startup_failure(exc: BaseException) -> None:

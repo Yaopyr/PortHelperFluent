@@ -48,13 +48,40 @@ def test_max_bytes_drops_oldest_records() -> None:
     assert log.total_bytes("tx") == 12
 
 
-def test_single_oversized_record_is_kept() -> None:
+def test_oversized_record_is_truncated_to_newest_bytes() -> None:
     log = SessionLog(max_bytes=4, max_records=10)
 
     log.add_bytes(b"0123456789", "rx")
 
-    assert len(log.records()) == 1
+    records = log.records()
+    assert len(records) == 1
+    assert records[0].data == b"6789"
+    assert sum(len(record.data) for record in records) <= 4
     assert log.total_bytes("rx") == 10
+
+
+def test_retained_bytes_stay_within_cap_after_oversized_record() -> None:
+    log = SessionLog(max_bytes=6, max_records=10)
+
+    log.add_bytes(b"abcdefghij", "rx")
+    log.add_bytes(b"12", "tx")
+
+    records = log.records()
+    assert [record.data for record in records] == [b"12"]
+    assert sum(len(record.data) for record in records) <= 6
+    assert log.total_bytes() == 12
+
+
+def test_total_bytes_without_direction_counts_only_rx_and_tx() -> None:
+    log = SessionLog()
+    log.add_bytes(b"abc", "rx")
+    log.add_bytes(b"de", "tx")
+    log.add_bytes(b"notice", "info")
+
+    assert log.total_bytes() == 5
+    assert log.total_bytes("rx") == 3
+    assert log.total_bytes("tx") == 2
+    assert log.total_bytes("info") == 6
 
 
 def test_clear_empties_records_but_keeps_lifetime_counters() -> None:

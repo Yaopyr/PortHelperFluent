@@ -128,3 +128,21 @@ def test_install_exception_hooks_keeps_keyboard_interrupt(tmp_path: Path) -> Non
     finally:
         sys.excepthook = old_hook
         threading.excepthook = old_thread_hook
+
+
+def test_install_exception_hooks_keeps_thread_system_exit(tmp_path: Path) -> None:
+    old_hook = sys.excepthook
+    old_thread_hook = threading.excepthook
+    try:
+        setup_logging(tmp_path / "logs")
+        install_exception_hooks(tmp_path / "logs")
+
+        args = threading.ExceptHookArgs(
+            (SystemExit, SystemExit(0), None, threading.current_thread())
+        )
+        threading.excepthook(args)
+
+        assert list((tmp_path / "logs").glob("crash-*.txt")) == []
+    finally:
+        sys.excepthook = old_hook
+        threading.excepthook = old_thread_hook

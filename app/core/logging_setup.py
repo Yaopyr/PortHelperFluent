@@ -67,7 +67,11 @@ def install_exception_hooks(
     log_dir: Path,
     on_error: Callable[[str], None] | None = None,
 ) -> None:
-    """安装主线程与子线程异常钩子：写崩溃报告、写日志并通知界面。"""
+    """安装主线程与子线程异常钩子：写崩溃报告、写日志并通知界面。
+
+    主线程的 KeyboardInterrupt 与子线程的 SystemExit 保持默认行为，不写崩溃报告，
+    避免把用户主动中断或正常退出误报为崩溃。
+    """
     log_dir = Path(log_dir)
     logger = get_logger()
 

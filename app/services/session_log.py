@@ -12,6 +12,8 @@ from pathlib import Path
 from app.core.encoding import decode_bytes, to_hex
 from app.services.exports import write_text_atomic
 
+DATA_DIRECTIONS = ("rx", "tx")
+
 
 @dataclass(frozen=True)
 class LogRecord:
@@ -24,8 +26,9 @@ class LogRecord:
 class SessionLog:
     """内存会话记录。
 
-    记录数或字节数超过上限时丢弃最旧记录，但累计收发字节数保留生命周期总量，
-    因此界面上的收发计数不会因丢帧或清空记录而回退。
+    记录数或保留字节数超过上限时先截断单条超长记录（只保留最新字节），
+    再丢弃最旧记录；累计收发字节数保留生命周期总量，因此界面上的收发计数
+    不会因丢帧、截断或清空记录而回退。
     """
 
     def __init__(self, max_bytes: int = 8 * 1024 * 1024, max_records: int = 100_000) -> None:
@@ -38,19 +41,28 @@ class SessionLog:
         self._lifetime_bytes: dict[str, int] = {"rx": 0, "tx": 0, "info": 0}
 
     def add(self, record: LogRecord) -> None:
+        full_size = len(record.data)
+        self._lifetime_bytes[record.direction] = (
+            self._lifetime_bytes.get(record.direction, 0) + full_size
+        )
+        if full_size > self._max_bytes:
+            # 单条记录超过字节上限时保留最新 max_bytes 字节，确保保留量不超限。
+            record = LogRecord(
+                timestamp=record.timestamp,
+                direction=record.direction,
+                source=record.source,
+                data=bytes(record.data[-self._max_bytes :]),
+            )
         self._records.append(record)
         self._kept_bytes += len(record.data)
-        self._lifetime_bytes[record.direction] = (
-            self._lifetime_bytes.get(record.direction, 0) + len(record.data)
-        )
-        # 至少保留最新一条，避免单条超长记录把日志清空。
-        while len(self._records) > 1 and (
+        while self._records and (
             len(self._records) > self._max_records or self._kept_bytes > self._max_bytes
         ):
             dropped = self._records.popleft()
             self._kept_bytes -= len(dropped.data)
 
     def add_bytes(self, data: bytes, direction: str, source: str = "") -> LogRecord:
+        """追加一条记录；返回值是调用方创建的完整记录（存储副本可能因字节上限被截断）。"""
         record = LogRecord(datetime.now(), direction, source, bytes(data))
         self.add(record)
         return record
@@ -63,8 +75,9 @@ class SessionLog:
         return tuple(self._records)
 
     def total_bytes(self, direction: str | None = None) -> int:
+        """累计字节数；direction 为 None 时只统计 RX+TX，info 不计入界面收发计数。"""
         if direction is None:
-            return sum(self._lifetime_bytes.values())
+            return sum(self._lifetime_bytes.get(item, 0) for item in DATA_DIRECTIONS)
         return self._lifetime_bytes.get(direction, 0)
 
     def export_txt(self, path: Path, codec: str = "utf-8", hex_mode: bool = False) -> None:
