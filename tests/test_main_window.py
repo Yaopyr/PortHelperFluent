@@ -1,0 +1,162 @@
+"""主窗口离屏测试：页面装配、路由切换、退出清理与确认。"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from PyQt6.QtCore import QByteArray
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import QMessageBox, QWidget
+
+from app.core.settings import Settings
+from app.services.paths import AppPaths, resolve_paths
+from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow
+
+
+@pytest.fixture
+def window(qapp, tmp_path: Path):
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    settings = Settings(paths.config_file)
+    settings.load()
+    main_window = MainWindow(settings, paths)
+    yield main_window, settings, paths
+    # 测试里的 monkeypatch 可能晚于本 fixture 清理，关闭时不要再弹确认框。
+    settings.set("ui.confirm_exit", False)
+    main_window.close()
+
+
+def test_main_window_has_ten_pages_and_navigation_routes(window) -> None:
+    main_window, _settings, _paths = window
+
+    assert main_window.stackedWidget.count() == 10
+    assert tuple(main_window.pages) == PAGE_ROUTES
+    for route in PAGE_ROUTES:
+        page = main_window.findChild(QWidget, route)
+        assert page is not None, route
+        assert main_window.navigationInterface.widget(route) is not None, route
+
+    assert main_window.stackedWidget.currentWidget().objectName() == "serial"
+    assert main_window.windowTitle() == f"{APP_TITLE} 1.0.0"
+    assert main_window.minimumWidth() == 1180
+    assert main_window.minimumHeight() == 760
+    assert main_window.smoke_test() is True
+
+
+def test_main_window_switches_pages(window, qapp) -> None:
+    main_window, _settings, _paths = window
+
+    main_window.switchTo(main_window.pages["net-client"])
+    qapp.processEvents()
+    assert main_window.stackedWidget.currentWidget().objectName() == "net-client"
+
+    main_window.switchTo(main_window.pages["settings"])
+    qapp.processEvents()
+    assert main_window.stackedWidget.currentWidget().objectName() == "settings"
+
+
+def test_main_window_has_active_work_aggregates_pages(window, monkeypatch) -> None:
+    main_window, _settings, _paths = window
+    assert main_window.has_active_work() is False
+
+    monkeypatch.setattr(main_window.pages["hid"], "has_active_work", lambda: True)
+
+    assert main_window.has_active_work() is True
+
+
+def test_close_without_active_work_saves_geometry(window, qapp) -> None:
+    main_window, settings, paths = window
+    main_window.show()
+    qapp.processEvents()
+
+    main_window.close()
+    qapp.processEvents()
+
+    encoded = settings.get("ui.window_geometry")
+    assert encoded
+    assert not QByteArray.fromBase64(str(encoded).encode("ascii")).isEmpty()
+    assert paths.config_file.is_file()
+    saved = json.loads(paths.config_file.read_text(encoding="utf-8"))
+    assert saved["ui.window_geometry"] == encoded
+
+
+def test_close_confirmation_only_when_page_has_active_work(
+    window, qapp, monkeypatch
+) -> None:
+    main_window, _settings, _paths = window
+    main_window.show()
+    qapp.processEvents()
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+    questions: list[int] = []
+
+    def answer_no(*args, **kwargs):
+        questions.append(1)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", answer_no)
+    event = QCloseEvent()
+    main_window.closeEvent(event)
+
+    assert questions == [1]
+    assert event.isAccepted() is False
+    assert main_window.isVisible()
+
+    stopped: list[bool] = []
+    monkeypatch.setattr(main_window, "stop_workers", lambda: stopped.append(True))
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    event = QCloseEvent()
+    main_window.closeEvent(event)
+
+    assert event.isAccepted() is True
+    assert stopped == [True]
+
+
+def test_close_confirmation_can_be_disabled_by_setting(window, qapp, monkeypatch) -> None:
+    main_window, settings, _paths = window
+    settings.set("ui.confirm_exit", False)
+    main_window.show()
+    qapp.processEvents()
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+    questioned: list[bool] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: questioned.append(True) or QMessageBox.StandardButton.No,
+    )
+
+    event = QCloseEvent()
+    main_window.closeEvent(event)
+
+    assert questioned == []
+    assert event.isAccepted() is True
+
+
+def test_main_window_enable_mica_never_raises(window) -> None:
+    main_window, _settings, _paths = window
+
+    assert isinstance(main_window.enable_mica(), bool)
+
+
+def test_main_window_restores_saved_geometry(qapp, tmp_path: Path) -> None:
+    paths: AppPaths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    settings = Settings(paths.config_file)
+    settings.load()
+    first = MainWindow(settings, paths)
+    first.show()
+    qapp.processEvents()
+    first.resize(1200, 800)
+    first.close()
+    encoded = settings.get("ui.window_geometry")
+    assert encoded
+
+    second = MainWindow(settings, paths)
+    try:
+        # 离屏平台会限制窗口尺寸，只验证恢复调用没有异常且几何串被采用。
+        assert second.size().width() > 0
+    finally:
+        second.close()

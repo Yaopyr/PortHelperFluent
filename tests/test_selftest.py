@@ -240,41 +240,59 @@ def test_selftest_report_write_failure_returns_one_without_traceback(
     assert "写入自检报告失败" in capsys.readouterr().err
 
 
+def test_selftest_reports_broken_main_window(tmp_path: Path, monkeypatch) -> None:
+    """主窗口模块损坏必须让自检失败，而不是回退到占位界面。"""
+    import main
+
+    monkeypatch.setitem(sys.modules, "app.ui.main_window", None)
+    report_path = tmp_path / "report.json"
+
+    exit_code = main.run_selftest(report_path)
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert any("主窗口导入失败" in error for error in payload["errors"])
+
+
 def test_binding_check_accepts_current_install() -> None:
     from main import check_fluent_binding
 
     check_fluent_binding()
 
 
-def test_placeholder_window_is_a_fluent_window(qapp) -> None:
-    from PyQt6.QtWidgets import QWidget
-    from qfluentwidgets import FluentWindow
-
-    from main import build_placeholder_window
-
-    window = build_placeholder_window()
-
-    assert isinstance(window, FluentWindow)
-    assert isinstance(window, QWidget)
-    assert "PortHelper" in window.windowTitle()
-    window.close()
-
-
-def test_create_main_window_falls_back_when_ui_module_is_missing(qapp, monkeypatch) -> None:
-    from PyQt6.QtWidgets import QWidget
+def test_create_main_window_builds_real_fluent_window(qapp, tmp_path: Path) -> None:
     from qfluentwidgets import FluentWindow
 
     import main
     from app.core.settings import Settings
+    from app.services.paths import resolve_paths
 
-    monkeypatch.setitem(sys.modules, "app.ui.main_window", None)
+    settings = Settings(tmp_path / "config.json")
+    settings.load()
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
 
-    window = main.create_main_window(Settings(REPO_ROOT / "unused-config.json"))
+    window = main.create_main_window(settings, paths)
 
     assert isinstance(window, FluentWindow)
-    assert isinstance(window, QWidget)
-    assert window.findChild(QWidget, "placeholderView") is not None
+    assert window.windowTitle() == "PortHelper Fluent 1.0.0"
+    assert window.smoke_test() is True
     window.close()
+
+
+def test_create_main_window_fails_loudly_when_ui_module_is_missing(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    import main
+    from app.core.settings import Settings
+    from app.services.paths import resolve_paths
+
+    monkeypatch.setitem(sys.modules, "app.ui.main_window", None)
+    settings = Settings(tmp_path / "config.json")
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+
+    with pytest.raises(ModuleNotFoundError):
+        main.create_main_window(settings, paths)
 
 
 def test_run_gui_reports_binding_failure_without_generic_startup_handler(
@@ -339,11 +357,11 @@ def _fail_generic_handler(exc: BaseException) -> None:
     pytest.fail(f"绑定自检失败不应走通用启动失败处理：{exc}")
 
 
-def _fail_window_creation(settings) -> None:
+def _fail_window_creation(settings, paths) -> None:
     pytest.fail("绑定自检失败后不应创建主窗口")
 
 
-def _raise_window_error(settings) -> None:
+def _raise_window_error(settings, paths) -> None:
     raise RuntimeError("模拟窗口创建失败")
 
 
@@ -503,7 +521,7 @@ def test_main_routes_gui_error_to_startup_handler(tmp_path: Path, monkeypatch, q
         handled.append(exc)
         original_handler(exc, *args, **kwargs)
 
-    def raise_gui_error() -> int:
+    def raise_gui_error(*args, **kwargs) -> int:
         raise RuntimeError("模拟 GUI 启动异常")
 
     monkeypatch.setattr(main, "resolve_paths", lambda: paths)
@@ -541,7 +559,7 @@ def test_run_gui_warns_about_portable_fallback_and_keeps_running(
     _deny_mkdir(monkeypatch, portable_paths.data_dir)
     monkeypatch.setenv("APPDATA", str(appdata))
     monkeypatch.setattr(main, "resolve_paths", lambda: portable_paths)
-    monkeypatch.setattr(main, "create_main_window", lambda settings: stub)
+    monkeypatch.setattr(main, "create_main_window", lambda settings, paths: stub)
     monkeypatch.setattr(main, "_show_warning_dialog", warnings.append)
     monkeypatch.setattr(main, "_show_error_dialog", errors.append)
     # 不进入真实事件循环，只验证启动流程本身。

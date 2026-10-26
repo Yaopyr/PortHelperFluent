@@ -1,7 +1,6 @@
-"""PortHelper Fluent 入口：启动自检与临时占位窗口。
+"""PortHelper Fluent 入口：启动自检、真实 Fluent 主窗口与启动冒烟测试。
 
 Qt 相关导入都放在函数内部，确保依赖缺失时仍能完成自检并写出报告。
-Task 2 会用真实的 Fluent 主窗口替换这里的占位窗口。
 """
 
 from __future__ import annotations
@@ -62,44 +61,15 @@ def check_fluent_binding() -> None:
         raise RuntimeError(BINDING_FAILURE_HINT)
 
 
-def build_placeholder_window() -> "QWidget":
-    """Task 2 之前的最小可启动窗口。"""
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QVBoxLayout, QWidget
-    from qfluentwidgets import BodyLabel, FluentIcon, FluentWindow, SubtitleLabel
+def create_main_window(settings: Settings, paths: AppPaths) -> "QWidget":
+    """创建真实主窗口；导入或构造失败直接上抛，由启动失败处理明确报告。
 
-    window = FluentWindow()
-    window.setWindowTitle(f"{APP_TITLE} {APP_VERSION}")
-    window.resize(960, 640)
+    Task 2 之后不再有「界面构建中」的占位回退：主窗口缺失属于安装损坏，
+    静默降级只会让用户以为功能没做。
+    """
+    from app.ui.main_window import MainWindow
 
-    view = QWidget()
-    view.setObjectName("placeholderView")
-    layout = QVBoxLayout(view)
-    layout.setSpacing(12)
-    layout.addStretch(1)
-
-    title = SubtitleLabel("主界面正在构建中", view)
-    title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    layout.addWidget(title)
-
-    hint = BodyLabel("配置、日志与会话记录等核心能力已就绪，完整界面将在后续版本提供。", view)
-    hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    layout.addWidget(hint)
-
-    layout.addStretch(1)
-    window.addSubInterface(view, FluentIcon.HOME, "首页")
-    return window
-
-
-def create_main_window(settings: Settings) -> "QWidget":
-    """优先使用 app.ui.main_window.MainWindow（Task 2），否则回退到占位窗口。"""
-    try:
-        from app.ui.main_window import MainWindow
-    except ModuleNotFoundError as exc:
-        if exc.name not in ("app.ui.main_window", "app.ui"):
-            raise
-        return build_placeholder_window()
-    return MainWindow(settings)
+    return MainWindow(settings, paths)
 
 
 def run_selftest(report_path: Path | None = None) -> int:
@@ -149,6 +119,8 @@ def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> Non
     except Exception as exc:
         errors.append(f"Qt 绑定自检失败：{exc}")
 
+    _check_main_window_import(errors)
+
     paths: AppPaths | None = None
     try:
         paths, portable_warning = ensure_writable_paths(resolve_paths())
@@ -163,6 +135,14 @@ def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> Non
 
     versions["qt"] = _probe(_qt_version, errors, "PyQt6")
     versions["qfluentwidgets"] = _probe(_qfluentwidgets_version, errors, "PyQt6-Fluent-Widgets")
+
+
+def _check_main_window_import(errors: list[str]) -> None:
+    """主窗口是启动必需组件；模块损坏必须让自检失败，而不是回退占位界面。"""
+    try:
+        importlib.import_module("app.ui.main_window")
+    except Exception as exc:
+        errors.append(f"主窗口导入失败：{exc}")
 
 
 def _check_selftest_writable(paths: AppPaths, errors: list[str]) -> None:
@@ -224,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.selftest:
         return run_selftest(args.report)
     try:
-        return _run_gui()
+        return _run_gui(smoke_test=args.smoke_test)
     except Exception as exc:
         _handle_startup_failure(exc)
         return 1
@@ -237,10 +217,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--selftest", action="store_true", help="执行启动自检后退出")
     parser.add_argument("--report", type=Path, default=None, help="自检报告 JSON 的输出路径")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="启动真实主窗口并在 1.5 秒后自动退出（发布前冒烟检查）",
+    )
     return parser.parse_args(argv)
 
 
-def _run_gui() -> int:
+def _run_gui(smoke_test: bool = False) -> int:
     """解析生效路径后启动界面；启动失败时把生效路径交给启动失败处理。"""
     paths, portable_warning = ensure_writable_paths(resolve_paths())
     try:
@@ -250,14 +235,20 @@ def _run_gui() -> int:
         # QApplication 还没创建：钩子只写日志与崩溃报告，不触碰任何 Qt 控件。
         # `_start_gui` 在 QApplication 就绪后会换成排队到 GUI 线程的错误提示回调。
         install_exception_hooks(paths.log_dir)
-        return _start_gui(paths, portable_warning, logger)
+        return _start_gui(paths, portable_warning, logger, smoke_test=smoke_test)
     except Exception as exc:
         # 必须传生效路径：便携目录不可写时崩溃报告要落在 AppData 回退目录。
         _handle_startup_failure(exc, paths)
         return 1
 
 
-def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Logger) -> int:
+def _start_gui(
+    paths: AppPaths,
+    portable_warning: str | None,
+    logger: logging.Logger,
+    *,
+    smoke_test: bool = False,
+) -> int:
     """在已解析的生效路径上创建 QApplication 与主窗口。"""
     settings = Settings(paths.config_file)
     settings.load()
@@ -294,12 +285,22 @@ def _start_gui(paths: AppPaths, portable_warning: str | None, logger: logging.Lo
     except Exception as exc:
         return _handle_binding_failure(exc, paths.log_dir)
 
-    window = create_main_window(settings)
+    window = create_main_window(settings, paths)
     window.show()
-    if portable_warning and _dialogs_enabled():
+    # 模态提示会阻塞 --smoke-test 的自动退出，冒烟模式只写日志。
+    if portable_warning and _dialogs_enabled() and not smoke_test:
         _show_warning_dialog(portable_warning)
     logger.info("%s %s 已启动，数据目录：%s", APP_TITLE, APP_VERSION, paths.data_dir)
-    return app.exec()
+
+    if smoke_test:
+        from PyQt6.QtCore import QTimer
+
+        QTimer.singleShot(1500, app.quit)
+    exit_code = app.exec()
+    if smoke_test:
+        logger.info("启动冒烟测试完成")
+        return 0
+    return exit_code
 
 
 def _binding_failure_message(exc: BaseException) -> str:

@@ -170,6 +170,69 @@ def test_qt_message_handler_guard_is_thread_local(qapp) -> None:
     assert any("worker-qt-message" in text for text in logger.messages)
 
 
+def test_qt_fatal_message_writes_crash_report(tmp_path: Path, qapp) -> None:
+    """QtFatalMsg 会终止进程，除了 critical 日志还必须留下崩溃报告。"""
+    from app.ui import qt_utils
+
+    logger = setup_logging(tmp_path / "logs")
+    qt_utils.install_qt_message_handler(logger)
+    handler = qt_utils._MESSAGE_HANDLER
+    assert handler is not None
+
+    handler(QtMsgType.QtFatalMsg, _FakeContext(), "fatal-test-message")
+
+    for log_handler in logger.handlers:
+        log_handler.flush()
+    reports = list((tmp_path / "logs").glob("crash-*.txt"))
+    assert len(reports) == 1
+    assert "fatal-test-message" in reports[0].read_text(encoding="utf-8")
+    assert "fatal-test-message" in (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+
+
+def test_uninstall_restores_previous_handler(qapp) -> None:
+    """卸载时必须交还安装前的处理器，而不是把其他组件的处理器一并清空。"""
+    from PyQt6.QtCore import qInstallMessageHandler, qWarning
+
+    from app.ui import qt_utils
+
+    seen: list[str] = []
+
+    def previous(mode, context, message: str) -> None:
+        seen.append(message)
+
+    qInstallMessageHandler(previous)
+    try:
+        qt_utils.install_qt_message_handler(_RecordingLogger())
+        qt_utils.uninstall_qt_message_handler()
+
+        assert qt_utils._MESSAGE_HANDLER is None
+        qWarning("restored-handler-test")
+    finally:
+        qInstallMessageHandler(None)
+
+    assert any("restored-handler-test" in message for message in seen)
+
+
+def test_install_does_not_mark_handler_when_qt_install_fails(qapp, monkeypatch) -> None:
+    """安装失败时不能留下“已安装”的假状态，否则后续安装会被幂等检查挡住。"""
+    from PyQt6.QtCore import qInstallMessageHandler
+
+    from app.ui import qt_utils
+
+    def broken_install(handler):
+        raise RuntimeError("模拟 qInstallMessageHandler 失败")
+
+    import PyQt6.QtCore as qt_core
+
+    monkeypatch.setattr(qt_core, "qInstallMessageHandler", broken_install)
+
+    with pytest.raises(RuntimeError, match="qInstallMessageHandler"):
+        qt_utils.install_qt_message_handler(_RecordingLogger())
+
+    assert qt_utils._MESSAGE_HANDLER is None
+    qInstallMessageHandler(None)
+
+
 def test_startup_installs_handler_before_qapplication_creation(
     tmp_path: Path, monkeypatch, qapp
 ) -> None:

@@ -106,7 +106,7 @@ class SessionLog:
         """导出文本；文件固定 UTF-8，codec 只用于把原始字节解码成文本列。"""
         lines = []
         for record in self._records:
-            payload = to_hex(record.data) if hex_mode else decode_bytes(record.data, codec)
+            payload = _format_payload(record, codec, hex_mode)
             prefix = f"{record.source}: " if record.source else ""
             lines.append(
                 f"[{_format_time(record.timestamp)}] [{record.direction.upper()}] {prefix}{payload}"
@@ -126,10 +126,19 @@ class SessionLog:
                     record.source,
                     len(record.data),
                     to_hex(record.data),
-                    "" if hex_mode else decode_bytes(record.data, codec),
+                    "" if hex_mode else _format_payload(record, codec, hex_mode=False),
                 ]
             )
         write_text_atomic(Path(path), buffer.getvalue(), encoding="utf-8-sig")
+
+
+def _format_payload(record: LogRecord, codec: str, hex_mode: bool) -> str:
+    """信息行是程序生成的 UTF-8 文本，不随串口/网络编码切换而改变。"""
+    if hex_mode:
+        return to_hex(record.data)
+    if record.direction == "info":
+        return record.data.decode("utf-8", errors="replace")
+    return decode_bytes(record.data, codec)
 
 
 def _format_time(timestamp: datetime) -> str:
