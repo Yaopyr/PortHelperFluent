@@ -1,8 +1,8 @@
 """图片取模核心：缩放、色彩量化、扫描排列与 C/BIN/LVGL 导出。
 
 本模块不依赖 Qt，可被单元测试直接导入。图像统一先转换为 RGBA，再把透明
-像素合成到指定背景色，最后按颜色深度量化。1 位输出使用固定阈值 128：
-亮度 >= 128 记为 1（白），低于 128 记为 0（黑），``invert`` 会把结果取反。
+像素合成到指定背景色，最后按颜色深度量化。1 位输出使用可配置阈值（默认 128）：
+亮度 >= threshold 记为 1（白），低于 threshold 记为 0（黑），``invert`` 会把结果取反。
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ IMAGE_SUFFIXES = frozenset(
     }
 )
 MAX_DIMENSION = 16384
+MAX_PIXELS = 16_000_000
 VALUES_PER_LINE = 12
 
 _LVGL8_FORMATS = {
@@ -120,6 +121,7 @@ class ImageParams:
     height: int | None = None
     background: tuple[int, int, int] = (0, 0, 0)
     invert: bool = False
+    threshold: int = 128
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -128,6 +130,11 @@ class ImageParams:
             _choice(self.output_type, OUTPUT_TYPES, "输出类型"),
         )
         object.__setattr__(self, "scan", _choice(self.scan, SCANS, "扫描方式"))
+        try:
+            threshold = int(self.threshold)
+        except (TypeError, ValueError):
+            threshold = 128
+        object.__setattr__(self, "threshold", max(0, min(255, threshold)))
         object.__setattr__(
             self, "direction", _choice(self.direction, DIRECTIONS, "扫描方向")
         )
@@ -221,6 +228,11 @@ def convert_image(
     target_width, target_height = _target_size(
         image.size, params.width, params.height
     )
+    if target_width * target_height > MAX_PIXELS:
+        raise ValueError(
+            f"输出尺寸 {target_width}×{target_height} 过大（上限 {MAX_PIXELS:,} 像素）。"
+            "请减小输出宽高后重试。"
+        )
 
     rgba = image.convert("RGBA")
     if rgba.size != (target_width, target_height):
@@ -232,7 +244,7 @@ def convert_image(
     if params.color_depth == 1:
         gray = np.asarray(flattened.convert("L"), dtype=np.uint8)
         data = _encode_bilevel(
-            _scan_order(gray, scan, direction), params.invert
+            _scan_order(gray, scan, direction), params.invert, params.threshold
         )
     else:
         data = _encode_pixels(
@@ -240,7 +252,9 @@ def convert_image(
             params.color_depth,
             params.byte_order,
         )
-    preview = _make_preview(flattened, params.color_depth, params.invert)
+    preview = _make_preview(
+        flattened, params.color_depth, params.invert, params.threshold
+    )
 
     text: str | None = None
     if params.output_type == "c":
@@ -458,8 +472,8 @@ def _scan_order(
     return ordered.reshape(-1, *pixels.shape[2:])
 
 
-def _encode_bilevel(ordered_gray: np.ndarray, invert: bool) -> bytes:
-    white = (ordered_gray >= 128) != bool(invert)
+def _encode_bilevel(ordered_gray: np.ndarray, invert: bool, threshold: int = 128) -> bytes:
+    white = (ordered_gray >= int(threshold)) != bool(invert)
     return np.packbits(white.astype(np.uint8), bitorder="big").tobytes()
 
 
@@ -489,10 +503,11 @@ def _make_preview(
     flattened: Image.Image,
     depth: int,
     invert: bool,
+    threshold: int = 128,
 ) -> Image.Image:
     if depth == 1:
         gray = np.asarray(flattened.convert("L"), dtype=np.uint8)
-        white = (gray >= 128) != bool(invert)
+        white = (gray >= int(threshold)) != bool(invert)
         return Image.fromarray(
             np.where(white, 255, 0).astype(np.uint8), mode="L"
         ).convert("RGB")

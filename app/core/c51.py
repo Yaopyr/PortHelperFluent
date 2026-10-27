@@ -951,7 +951,7 @@ def _delay_lines(cfg: C51Config) -> list[str]:
     loops = max(1, int(round(cycle_us))) if cycle_us > 0 else 1
     return [
         "/* 粗略软件延时：按当前晶振估算，编译器优化后可能偏短，请用示波器校准 */",
-        "static void delay_us(unsigned int us)",
+        "static void delay_us(unsigned long us)",
         "{",
         "    unsigned int i;",
         "",

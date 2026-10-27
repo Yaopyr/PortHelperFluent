@@ -29,19 +29,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "serial.stop_bits": 1,
     "serial.parity": "none",
     "serial.flow": "none",
-    "serial.encoding": "utf-8",
+    "serial.encoding": None,
     "serial.hex_send": False,
     "serial.hex_display": False,
     "serial.timestamp": True,
     "net.host": "127.0.0.1",
     "net.port": 8080,
     "net.udp_port": 8080,
-    "net.encoding": "utf-8",
+    "net.encoding": None,
     "server.port": 8080,
     "server.max_clients": 16,
     "hid.report_id": 0,
     "hid.report_length": 64,
-    "checksum.encoding": "utf-8",
+    "checksum.encoding": None,
     "paths.last_export": "",
 }
 
@@ -155,3 +155,12 @@ class Settings:
             os.close(fd)
             return candidate
         raise OSError(f"无法在 {self._path.parent} 中创建唯一的配置备份文件名")
+
+
+def resolve_page_encoding(settings: Settings, page_key: str) -> str:
+    """页面自己的编码优先；未设置时使用设置页的默认编码。"""
+    value = settings.get(page_key)
+    if value:
+        return str(value)
+    fallback = settings.get("ui.default_encoding") or "utf-8"
+    return str(fallback)

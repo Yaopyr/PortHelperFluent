@@ -37,7 +37,7 @@ from qfluentwidgets import (
 
 from app.core.encoding import CODEC_CHOICES, encode_text, parse_hex, resolve_codec
 from app.core.logging_setup import get_logger
-from app.core.settings import Settings
+from app.core.settings import Settings, resolve_page_encoding
 from app.io.serial_worker import PortInfo, SerialConfig, SerialWorker, list_ports
 from app.services.paths import AppPaths
 from app.services.session_log import SessionLog
@@ -84,14 +84,12 @@ class SerialPage(QWidget):
         self._file_name = ""
         self._file_size = 0
         self._file_sent = 0
+        self._file_awaiting_ack = False
+        self._file_pending_chunk = b""
 
         self._repeat_timer = QTimer(self)
         self._repeat_timer.setInterval(1000)
         self._repeat_timer.timeout.connect(self._send_repeat)
-
-        self._file_timer = QTimer(self)
-        self._file_timer.setInterval(5)
-        self._file_timer.timeout.connect(self._send_file_chunk)
 
         self._build_ui()
         self._create_worker()
@@ -373,7 +371,7 @@ class SerialPage(QWidget):
         _select_index(self.stop_bits_combo, _stopbits_text(self.settings.get("serial.stop_bits", 1)))
         _select_combo_value(self.parity_combo, PARITY_ITEMS, self.settings.get("serial.parity", "none"))
         _select_combo_value(self.flow_combo, FLOW_ITEMS, self.settings.get("serial.flow", "none"))
-        _select_combo_value(self.encoding_combo, ENCODING_ITEMS, self.settings.get("serial.encoding", "utf-8"))
+        _select_combo_value(self.encoding_combo, ENCODING_ITEMS, resolve_page_encoding(self.settings, "serial.encoding"))
         self.hex_send_check.setChecked(bool(self.settings.get("serial.hex_send", False)))
         _select_combo_value(self.newline_combo, NEWLINE_ITEMS, "none")
         hex_display = bool(self.settings.get("serial.hex_display", False))
@@ -587,6 +585,7 @@ class SerialPage(QWidget):
     def _on_data_sent(self, data: bytes) -> None:
         self.tx_log.append_bytes(data, "tx")
         self._refresh_counters()
+        self._on_file_data_sent(data)
 
     def _on_modem_changed(self, status: dict) -> None:
         mapping = {"CTS": "cts", "DSR": "dsr", "RING": "ri", "RLSD": "cd"}
@@ -621,6 +620,9 @@ class SerialPage(QWidget):
 
     @safe_slot
     def _send_current(self) -> bool:
+        if self._file_handle is not None:
+            show_warning(self, "文件发送中", "请等待文件发送完成或取消后再发送其他数据。")
+            return False
         if self._worker is None or not self._worker.is_open():
             show_warning(self, "串口未打开", "请先打开串口再发送。")
             self._stop_repeat()
@@ -670,6 +672,9 @@ class SerialPage(QWidget):
     @safe_slot
     def _send_text(self, text: str, hex_mode: bool, newline: bool) -> bool:
         """多项发送回调：newline 为 True 时追加 CRLF。"""
+        if self._file_handle is not None:
+            show_warning(self, "文件发送中", "请等待文件发送完成或取消后再发送其他数据。")
+            return False
         if self._worker is None or not self._worker.is_open():
             show_warning(self, "串口未打开", "请先打开串口再发送。")
             return False
@@ -716,15 +721,17 @@ class SerialPage(QWidget):
         self._file_name = path.name
         self._file_size = path.stat().st_size
         self._file_sent = 0
+        self._file_awaiting_ack = False
+        self._file_pending_chunk = b""
         self.send_button.setEnabled(False)
         self.send_file_button.setEnabled(False)
         self.cancel_file_button.setEnabled(True)
         self._update_file_label()
-        self._file_timer.start()
+        self._send_next_file_chunk()
 
-    def _send_file_chunk(self) -> None:
-        if self._file_handle is None:
-            self._stop_file_timer()
+    def _send_next_file_chunk(self) -> None:
+        """发送一块文件；必须等 worker 的 data_sent 确认后才读下一块，避免无界排队。"""
+        if self._file_handle is None or self._file_awaiting_ack:
             return
         try:
             chunk = self._file_handle.read(FILE_CHUNK)
@@ -738,12 +745,30 @@ class SerialPage(QWidget):
         if self._worker is None or not self._worker.send(chunk):
             self._cancel_file_send()
             return
-        self._file_sent += len(chunk)
+        self._file_pending_chunk = chunk
+        self._file_awaiting_ack = True
+
+    def _on_file_data_sent(self, data: bytes) -> None:
+        """根据真实写入字节推进文件发送；部分写入时重发剩余部分。"""
+        if self._file_handle is None or not self._file_awaiting_ack:
+            return
+        acked = len(data)
+        if acked <= 0:
+            return
+        self._file_sent += acked
+        self._file_pending_chunk = self._file_pending_chunk[acked:]
         self._update_file_label()
+        if self._file_pending_chunk:
+            if self._worker is None or not self._worker.send(self._file_pending_chunk):
+                self._cancel_file_send()
+            return
+        self._file_awaiting_ack = False
+        self._send_next_file_chunk()
 
     def _finish_file_send(self) -> None:
         self._close_file_handle()
-        self._stop_file_timer()
+        self._file_awaiting_ack = False
+        self._file_pending_chunk = b""
         self.file_progress_label.setText(f"文件发送完成：{self._file_name}（{self._file_sent} B）")
         self._set_file_buttons_idle()
         show_success(self, "文件发送完成", self._file_name)
@@ -752,7 +777,8 @@ class SerialPage(QWidget):
     def _cancel_file_send(self, silent: bool = False) -> None:
         was_active = self._file_handle is not None
         self._close_file_handle()
-        self._stop_file_timer()
+        self._file_awaiting_ack = False
+        self._file_pending_chunk = b""
         if was_active:
             self.file_progress_label.setText(f"文件发送已取消：{self._file_name}")
         self._set_file_buttons_idle()
@@ -765,9 +791,6 @@ class SerialPage(QWidget):
                 get_logger().exception("关闭发送文件句柄失败")
             finally:
                 self._file_handle = None
-
-    def _stop_file_timer(self) -> None:
-        self._file_timer.stop()
 
     def _set_file_buttons_idle(self) -> None:
         self.send_button.setEnabled(True)
@@ -852,7 +875,7 @@ class SerialPage(QWidget):
         return bool(
             (self._worker is not None and self._worker.is_open())
             or self._repeat_timer.isActive()
-            or self._file_timer.isActive()
+            or self._file_handle is not None
         )
 
     def stop_workers(self) -> None:

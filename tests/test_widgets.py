@@ -778,3 +778,36 @@ def test_file_picker_drop_handler_never_raises(qapp, monkeypatch, caplog) -> Non
     assert drop.isAccepted() is False
     assert "处理文件拖放失败" in caplog.text
     picker.close()
+
+
+def test_log_pane_uses_settings_font_size(qapp, tmp_path):
+    from app.core.settings import Settings
+    from app.ui.widgets.log_pane import LogPane
+
+    settings = Settings(tmp_path / "config.json")
+    settings.set("ui.log_font_size", 14)
+    pane = LogPane("font", settings=settings)
+    try:
+        assert pane.log_view.font().pointSize() == 14
+        pane.configure(font_size=12)
+        assert pane.log_view.font().pointSize() == 12
+        pane.configure(font_size=99)
+        assert pane.log_view.font().pointSize() == 24
+    finally:
+        pane.close()
+
+
+def test_log_pane_surfaces_session_truncation(qapp, tmp_path):
+    from app.services.session_log import SessionLog
+    from app.ui.widgets.log_pane import LogPane
+
+    pane = LogPane("truncate", session=SessionLog(max_bytes=8, max_records=100))
+    try:
+        pane.append_bytes(b"x" * 32, "rx")
+        assert pane.drop_label.isVisible() or pane.drop_label.text()
+        assert "已截断" in pane.drop_label.text()
+        out = tmp_path / "session.txt"
+        pane.save_txt(out)
+        assert "已丢弃" in out.read_text(encoding="utf-8")
+    finally:
+        pane.close()

@@ -412,3 +412,10 @@ def test_config_from_bad_dict_uses_safe_defaults() -> None:
 def test_timer_reload_rejects_unknown_index() -> None:
     with pytest.raises(ValueError):
         timer_reload(C51Config(), 3)
+
+
+def test_delay_uses_unsigned_long_for_large_values():
+    cfg = C51Config(crystal_mhz=12.0, delay_us=1_000_000)
+    text = generate_c(cfg)
+    assert "static void delay_us(unsigned long us)" in text
+    assert "delay_us(1000000);" in text

@@ -505,3 +505,17 @@ def test_preview_quantizes_colors() -> None:
     # 红色亮度低于 128 -> 黑；白色亮度高于阈值 -> 白。
     assert preview_1.getpixel((0, 0)) == (0, 0, 0)
     assert preview_1.getpixel((1, 1)) == (255, 255, 255)
+
+
+def test_one_bit_threshold_is_configurable() -> None:
+    image = Image.new("RGB", (8, 1), (120, 120, 120))
+    dark = convert_image(image, ImageParams(color_depth=1, threshold=200))
+    light = convert_image(image, ImageParams(color_depth=1, threshold=100))
+    assert dark.data == b"\x00"
+    assert light.data == b"\xff"
+
+
+def test_output_pixel_limit_is_enforced() -> None:
+    image = Image.new("RGB", (2, 2), (0, 0, 0))
+    with pytest.raises(ValueError, match="过大"):
+        convert_image(image, ImageParams(width=5000, height=5000))

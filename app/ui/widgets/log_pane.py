@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import CheckBox, FluentIcon, SubtitleLabel, SwitchButton, ToolButton
+from qfluentwidgets import CaptionLabel, CheckBox, FluentIcon, SubtitleLabel, SwitchButton, ToolButton
 
 from app.core.encoding import decode_bytes, to_hex
 from app.core.settings import DEFAULT_SETTINGS, Settings
@@ -32,6 +32,8 @@ FLUSH_MAX_BYTES = 256 * 1024
 PENDING_LIMIT = 20_000
 MIN_DISPLAY_LINES = 1000
 MAX_DISPLAY_LINES = 100_000
+MIN_FONT_SIZE = 9
+MAX_FONT_SIZE = 24
 
 
 class LogPane(QWidget):
@@ -54,12 +56,16 @@ class LogPane(QWidget):
         show_direction: bool = True,
         max_display_lines: int | None = None,
         auto_scroll: bool | None = None,
+        font_size: int | None = None,
         settings: Settings | None = None,
+        session: SessionLog | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._show_direction = show_direction
-        self._session = SessionLog()
+        self._session = session if session is not None else SessionLog()
+        self._last_dropped_bytes = self._session.dropped_bytes
+        self._drop_notice_shown = False
         self._pending: deque[LogRecord] = deque()
         self._pending_limit = PENDING_LIMIT
         self._display_dropped = 0
@@ -69,6 +75,7 @@ class LogPane(QWidget):
         self._paused = False
         self._max_display_lines = _resolve_display_lines(settings, max_display_lines)
         self._auto_scroll = _resolve_auto_scroll(settings, auto_scroll)
+        self._font_size = _resolve_font_size(settings, font_size)
 
         self._build_ui(title)
         self._timer = QTimer(self)
@@ -96,8 +103,9 @@ class LogPane(QWidget):
         *,
         max_display_lines: int | None = None,
         auto_scroll: bool | None = None,
+        font_size: int | None = None,
     ) -> None:
-        """应用用户设置；参数为 None 时保持当前值，行数超界时自动收敛。"""
+        """应用用户设置；参数为 None 时保持当前值，行数/字号超界时自动收敛。"""
         if max_display_lines is not None:
             self._max_display_lines = _clamp_display_lines(
                 max_display_lines, self._max_display_lines
@@ -108,12 +116,31 @@ class LogPane(QWidget):
             self._set_checked(self.autoscroll_check, self._auto_scroll)
             if self._auto_scroll:
                 self._scroll_to_bottom()
+        if font_size is not None:
+            self._font_size = _clamp_font_size(font_size, self._font_size)
+            self._apply_font_size()
 
     def append_bytes(self, data: bytes, direction: str, source: str = "") -> None:
         if not data:
             return
         record = self._session.add_bytes(bytes(data), direction, source)
         self._enqueue(record)
+        self._maybe_notice_truncation()
+
+    def _maybe_notice_truncation(self) -> None:
+        dropped = self._session.dropped_bytes
+        if dropped <= self._last_dropped_bytes:
+            return
+        self._last_dropped_bytes = dropped
+        self.drop_label.setText("会话记录已截断")
+        self.drop_label.setToolTip(
+            f"会话记录达到上限，最早的数据已丢弃（累计 {dropped} 字节）；"
+            "导出文件不包含被丢弃内容。"
+        )
+        self.drop_label.setVisible(True)
+        if not self._drop_notice_shown:
+            self._drop_notice_shown = True
+            self.append_info("会话记录已达上限，最早的数据已丢弃；导出将不包含被丢弃内容。")
 
     def append_info(self, text: str) -> None:
         if not text:
@@ -180,6 +207,10 @@ class LogPane(QWidget):
 
         self.title_label = SubtitleLabel(title, self)
         header.addWidget(self.title_label)
+        self.drop_label = CaptionLabel("", self)
+        self.drop_label.setStyleSheet("color: #C42B1C;")
+        self.drop_label.setVisible(False)
+        header.addWidget(self.drop_label)
         header.addStretch(1)
 
         self.hex_check = CheckBox("HEX", self)
@@ -220,10 +251,7 @@ class LogPane(QWidget):
         self.log_view.setMaximumBlockCount(self._max_display_lines)
         # 日志区不抢发送框的键盘焦点。
         self.log_view.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        font = QFont("Cascadia Mono")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(10)
-        self.log_view.setFont(font)
+        self._apply_font_size()
         root.addWidget(self.log_view, 1)
 
     def _tool_button(self, icon, tooltip: str, slot) -> ToolButton:
@@ -306,6 +334,12 @@ class LogPane(QWidget):
             return decode_bytes(record.data, self._codec)
         except Exception:
             return record.data.decode("utf-8", errors="replace")
+
+    def _apply_font_size(self) -> None:
+        font = QFont("Cascadia Mono")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(int(self._font_size))
+        self.log_view.setFont(font)
 
     def _scroll_to_bottom(self) -> None:
         if not self._auto_scroll:
@@ -407,6 +441,25 @@ def _settings_value(settings: Settings | None, key: str):
         return settings.get(key)
     except Exception:
         return None
+
+
+def _resolve_font_size(settings: Settings | None, explicit: int | None) -> int:
+    """显式参数 > Settings > 默认值；结果限制在 9–24。"""
+    default = int(DEFAULT_SETTINGS.get("ui.log_font_size", 10))
+    if explicit is not None:
+        return _clamp_font_size(explicit, default)
+    configured = _settings_value(settings, "ui.log_font_size")
+    if configured is not None:
+        return _clamp_font_size(configured, default)
+    return _clamp_font_size(default, default)
+
+
+def _clamp_font_size(value, fallback: int) -> int:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(MIN_FONT_SIZE, min(MAX_FONT_SIZE, size))
 
 
 def _clamp_display_lines(value, fallback: int) -> int:

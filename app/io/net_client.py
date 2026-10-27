@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import time
 import weakref
+from collections import deque
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtNetwork import (
@@ -20,6 +22,7 @@ from PyQt6.QtNetwork import (
 from app.core.logging_setup import get_logger
 
 MAX_DATAGRAM = 65535
+DNS_CACHE_TTL_S = 300.0
 
 _SOCKET_STATE = QAbstractSocket.SocketState
 _SOCKET_ERROR = QAbstractSocket.SocketError
@@ -33,6 +36,7 @@ class NetClientController(QObject):
     udp_state_changed = pyqtSignal(str)  # closed / bound
     tcp_data = pyqtSignal(bytes)
     udp_data = pyqtSignal(bytes)
+    udp_sent = pyqtSignal(bytes)
     error = pyqtSignal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -40,10 +44,11 @@ class NetClientController(QObject):
         self._tcp_state = "disconnected"
         self._udp_state = "closed"
         self._remote = ("", 0)
-        # UDP 域名异步解析：缓存最近解析结果，避免每次发送都阻塞 GUI 线程。
-        self._address_cache: dict[str, QHostAddress] = {}
-        self._pending_udp: tuple[bytes, str, int] | None = None
-        self._lookup_id = 0
+        # UDP 域名异步解析：按主机排队，避免高速发送时丢包；lookup ID 防止陈旧回调串包。
+        self._address_cache: dict[str, tuple[QHostAddress, float]] = {}
+        self._pending_udp: dict[str, deque[tuple[bytes, int]]] = {}
+        self._lookups: dict[int, str] = {}
+        self._lookup_ids: dict[str, int] = {}
 
         self._tcp_socket = QTcpSocket(self)
         self._tcp_socket.connected.connect(self._on_tcp_connected)
@@ -161,16 +166,15 @@ class NetClientController(QObject):
 
     def close_udp(self) -> None:
         self._cancel_host_lookup()
-        self._pending_udp = None
         if self._udp_socket.state() != _SOCKET_STATE.UnconnectedState:
             self._udp_socket.close()
         self._set_udp_state("closed")
 
     def send_udp(self, data: bytes, host: str, port: int) -> bool:
-        """发送 UDP 数据报；IP 直接发送，域名异步解析后由回调补发。
+        """发送 UDP 数据报；IP 直接发送，域名异步解析后补发。
 
-        返回 True 表示“已接受发送请求”。域名首次发送时不会阻塞 GUI 线程：
-        解析完成后在事件循环中写套接字，解析失败通过 `error` 信号报告。
+        返回 True 表示“已接受发送请求”。同一域名的连续发送会排队保留，
+        不会因为解析未完成而丢弃；不同域名各自使用 lookup ID，过期回调不会串包。
         """
         payload = bytes(data)
         if not payload:
@@ -191,10 +195,10 @@ class NetClientController(QObject):
         direct = QHostAddress(host)
         if not direct.isNull():
             return self._write_udp(payload, direct, target_port)
-        cached = self._address_cache.get(host.casefold())
+        cached = self._cached_address(host)
         if cached is not None:
             return self._write_udp(payload, cached, target_port)
-        return self._start_host_lookup(payload, host, target_port)
+        return self._queue_host_lookup(payload, host, target_port)
 
     def _write_udp(self, payload: bytes, address: QHostAddress, port: int) -> bool:
         written = self._udp_socket.writeDatagram(payload, address, int(port))
@@ -210,12 +214,25 @@ class NetClientController(QObject):
                 f"{self._udp_socket.errorString()}。"
             )
             return False
+        self.udp_sent.emit(bytes(payload))
         return True
 
-    def _start_host_lookup(self, payload: bytes, host: str, port: int) -> bool:
-        """发起异步域名解析；只保留最近一次待发送数据，旧查询被取消。"""
-        self._cancel_host_lookup()
-        self._pending_udp = (payload, host, port)
+    def _cached_address(self, host: str) -> QHostAddress | None:
+        key = host.casefold()
+        entry = self._address_cache.get(key)
+        if entry is None:
+            return None
+        address, stamp = entry
+        if time.monotonic() - stamp > DNS_CACHE_TTL_S:
+            self._address_cache.pop(key, None)
+            return None
+        return address
+
+    def _queue_host_lookup(self, payload: bytes, host: str, port: int) -> bool:
+        key = host.casefold()
+        self._pending_udp.setdefault(key, deque()).append((payload, port))
+        if key in self._lookup_ids:
+            return True
         controller_ref = weakref.ref(self)
 
         def _finished(info: QHostInfo) -> None:
@@ -224,45 +241,56 @@ class NetClientController(QObject):
                 target._on_udp_host_resolved(info)
 
         try:
-            self._lookup_id = _lookup_host_name(host, _finished)
+            lookup_id = _lookup_host_name(host, _finished)
         except Exception:
             get_logger().exception("发起域名解析失败：%s", host)
-            self._lookup_id = 0
-            self._pending_udp = None
+            lookup_id = 0
+        if lookup_id <= 0:
+            self._pending_udp.pop(key, None)
             self.error.emit(
                 f"无法解析目标地址“{host}”。请检查地址拼写、网络连接或 DNS 设置。"
             )
             return False
+        self._lookups[int(lookup_id)] = key
+        self._lookup_ids[key] = int(lookup_id)
         return True
 
-    def _cancel_host_lookup(self) -> None:
-        lookup_id, self._lookup_id = self._lookup_id, 0
-        if lookup_id > 0:
-            try:
-                QHostInfo.abortHostLookup(lookup_id)
-            except Exception:
-                get_logger().exception("取消域名解析失败：%s", lookup_id)
+    def _cancel_host_lookup(self, host: str | None = None) -> None:
+        keys = [host.casefold()] if host is not None else list(self._lookup_ids)
+        for key in keys:
+            lookup_id = self._lookup_ids.pop(key, 0)
+            self._lookups.pop(lookup_id, None)
+            self._pending_udp.pop(key, None)
+            if lookup_id > 0:
+                try:
+                    QHostInfo.abortHostLookup(lookup_id)
+                except Exception:
+                    get_logger().exception("取消域名解析失败：%s", lookup_id)
 
     def _on_udp_host_resolved(self, info: QHostInfo) -> None:
-        """域名解析完成：缓存 IPv4 优先地址并补发待发送数据。"""
+        """域名解析完成：只有当前 lookup ID 对应的主机才会消费自己的待发送队列。"""
         try:
-            self._lookup_id = 0
-            pending, self._pending_udp = self._pending_udp, None
-            if pending is None:
+            lookup_id = int(info.lookupId())
+            host = self._lookups.pop(lookup_id, None)
+            if host is None:
+                # 已取消或已被新的解析替换的陈旧回调，不能消费其他主机的数据。
                 return
-            payload, host, port = pending
+            self._lookup_ids.pop(host, None)
+            pending = self._pending_udp.pop(host, deque())
+            if not pending:
+                return
             address = _address_from_info(info)
             if address is None:
                 self.error.emit(
                     f"无法解析目标地址“{host}”。请检查地址拼写、网络连接或 DNS 设置。"
                 )
                 return
-            self._address_cache[host.casefold()] = address
+            self._address_cache[host] = (address, time.monotonic())
             if self._udp_socket.state() != _SOCKET_STATE.BoundState:
-                # 解析期间用户关闭了 UDP：丢弃这次发送，不再打扰用户。
                 get_logger().warning("UDP 已关闭，丢弃解析完成后的待发送数据：%s", host)
                 return
-            self._write_udp(payload, address, port)
+            for payload, port in pending:
+                self._write_udp(payload, address, port)
         except Exception:
             get_logger().exception("处理 UDP 域名解析结果失败")
 

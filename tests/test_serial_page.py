@@ -12,7 +12,7 @@ from app.io.serial_worker import PortInfo
 from app.services.paths import resolve_paths
 from app.ui.dialogs.multi_send_dialog import MultiSendDialog
 from app.ui.pages import serial_page as serial_page_module
-from app.ui.pages.serial_page import SerialPage
+from app.ui.pages.serial_page import SerialPage, FILE_CHUNK
 from app.ui.qt_utils import process_events_until
 
 
@@ -285,3 +285,46 @@ def test_multi_send_loop_uses_timer(qapp):
         assert not dialog._timers[0].isActive()
     finally:
         dialog.close()
+
+
+def test_file_send_waits_for_write_ack_and_does_not_queue_whole_file(qapp, tmp_path, monkeypatch):
+    class AckControlledWorker(FakeWorker):
+        def send(self, data):
+            if not self.open_flag:
+                return False
+            self.sent.append(bytes(data))
+            return True
+
+    monkeypatch.setattr(
+        serial_page_module,
+        "list_ports",
+        lambda: [PortInfo("COM_TEST", "Fake", "hw", None, None, None)],
+    )
+    settings = Settings(tmp_path / "config.json")
+    paths = resolve_paths(exe_path=tmp_path / "app", appdata=tmp_path / "appdata")
+    worker = AckControlledWorker()
+    page = SerialPage(settings, paths, worker_factory=lambda _parent: worker)
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"x" * (FILE_CHUNK + 100))
+    monkeypatch.setattr(
+        serial_page_module.QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *args, **kwargs: (str(path), "")),
+    )
+    page.show()
+    try:
+        page.port_combo.setCurrentText("COM_TEST")
+        page.open_button.click()
+        page.send_file_button.click()
+        assert len(worker.sent) == 1, "只应读取并排队第一块"
+        assert page._file_awaiting_ack is True
+        assert page.file_progress_label.text().startswith("payload.bin：0 /")
+
+        worker.data_sent.emit(worker.sent[0])
+        assert len(worker.sent) == 2
+        assert page._file_sent == FILE_CHUNK
+        worker.data_sent.emit(worker.sent[1])
+        assert page._file_handle is None
+        assert "完成" in page.file_progress_label.text()
+    finally:
+        page.close()

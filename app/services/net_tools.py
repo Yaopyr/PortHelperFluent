@@ -123,20 +123,6 @@ def adapter_info() -> list[dict]:
     return result
 
 
-def _gateway_for(name: str, addresses: list[str], gateways: dict[str, tuple[list[str], list[str]]]) -> str:
-    """按网卡名或 IPv4 地址匹配 GetAdaptersAddresses 的网关。"""
-    key = name.strip().lower()
-    entry = gateways.get(key)
-    if entry is None:
-        for candidate_name, (candidate_addresses, candidate_gateways) in gateways.items():
-            if set(addresses) & set(candidate_addresses):
-                entry = (candidate_addresses, candidate_gateways)
-                break
-    if entry is None:
-        return ""
-    return ", ".join(entry[1])
-
-
 def _decode_output(raw) -> str:
     """按系统区域编码解码 ping 输出；无法解码的字节用替代符保留。"""
     if raw is None:

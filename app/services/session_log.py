@@ -114,6 +114,11 @@ class SessionLog:
         信息行是程序生成的 UTF-8 文本，即使 hex_mode 为 True 也始终按文本导出。
         """
         lines = []
+        if self._dropped_bytes or self._dropped_records:
+            lines.append(
+                f"# 注意：会话记录已达上限，已丢弃 {self._dropped_records} 条 / "
+                f"{self._dropped_bytes} 字节；以下为保留内容。"
+            )
         for record in self._records:
             payload = _format_payload(record, codec, hex_mode)
             prefix = f"{record.source}: " if record.source else ""

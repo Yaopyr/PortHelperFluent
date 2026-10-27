@@ -45,7 +45,7 @@ from app.core.checksum import (
 )
 from app.core.encoding import encode_text, parse_hex
 from app.core.logging_setup import get_logger
-from app.core.settings import Settings
+from app.core.settings import Settings, resolve_page_encoding
 from app.services.paths import AppPaths
 from app.ui.dialogs.custom_crc_dialog import CustomCrcDialog
 from app.ui.feedback import show_error
@@ -349,7 +349,7 @@ class ChecksumPage(QWidget):
         return card
 
     def _restore_settings(self) -> None:
-        saved = str(self.settings.get("checksum.encoding", "utf-8"))
+        saved = resolve_page_encoding(self.settings, "checksum.encoding")
         index = self.encoding_combo.findData(saved)
         if index < 0:
             index = self.encoding_combo.findData("utf-8")

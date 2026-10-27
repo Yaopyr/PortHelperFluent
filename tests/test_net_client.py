@@ -183,15 +183,24 @@ def test_udp_bind_port_in_use_emits_error(qapp) -> None:
 class _FakeHostInfo:
     """QHostInfo 的最小替身，避免测试依赖真实 DNS。"""
 
-    def __init__(self, addresses=(), error=QHostInfo.HostInfoError.NoError) -> None:
+    def __init__(
+        self,
+        addresses=(),
+        error=QHostInfo.HostInfoError.NoError,
+        lookup_id: int = 0,
+    ) -> None:
         self._addresses = list(addresses)
         self._error = error
+        self._lookup_id = int(lookup_id)
 
     def error(self):
         return self._error
 
     def addresses(self):
         return list(self._addresses)
+
+    def lookupId(self):
+        return self._lookup_id
 
 
 def test_udp_hostname_lookup_is_async_and_cached(qapp, monkeypatch) -> None:
@@ -217,7 +226,7 @@ def test_udp_hostname_lookup_is_async_and_cached(qapp, monkeypatch) -> None:
         assert datagrams == []
 
         callback = lookups[0][1]
-        callback(_FakeHostInfo([QHostAddress("127.0.0.1")]))
+        callback(_FakeHostInfo([QHostAddress("127.0.0.1")], lookup_id=99))
         assert process_events_until(
             lambda: b"async" in datagrams, timeout_ms=3000
         ), datagrams
@@ -249,8 +258,49 @@ def test_udp_hostname_lookup_failure_emits_readable_error(qapp, monkeypatch) -> 
         controller.bind_udp(0)
         assert controller.send_udp(b"x", "missing.local", 9) is True
         lookups[0](
-            _FakeHostInfo(error=QHostInfo.HostInfoError.HostNotFound)
+            _FakeHostInfo(
+                error=QHostInfo.HostInfoError.HostNotFound, lookup_id=100
+            )
         )
         assert errors and "无法解析" in errors[-1]
     finally:
         controller.close_udp()
+
+
+def test_udp_hostname_rapid_sends_queue_and_stale_callbacks_are_ignored(qapp, monkeypatch) -> None:
+    receiver = QUdpSocket()
+    assert receiver.bind(QHostAddress("127.0.0.1"), 0)
+    receive_port = int(receiver.localPort())
+    controller = NetClientController()
+    sent: list[bytes] = []
+    controller.udp_sent.connect(sent.append)
+    lookups: list[tuple[str, int, object]] = []
+    next_id = 201
+
+    def fake_lookup(host: str, callback) -> int:
+        nonlocal next_id
+        lookup_id = next_id
+        next_id += 1
+        lookups.append((host, lookup_id, callback))
+        return lookup_id
+
+    monkeypatch.setattr(net_client_module, "_lookup_host_name", fake_lookup)
+    try:
+        controller.bind_udp(0)
+        assert controller.send_udp(b"a1", "a.local", receive_port)
+        assert controller.send_udp(b"a2", "a.local", receive_port)
+        assert controller.send_udp(b"b1", "b.local", receive_port)
+        assert [name for name, _id, _cb in lookups] == ["a.local", "b.local"]
+
+        by_host = {name: (lookup_id, callback) for name, lookup_id, callback in lookups}
+        a_id, a_callback = by_host["a.local"]
+        b_id, b_callback = by_host["b.local"]
+        a_callback(_FakeHostInfo([QHostAddress("127.0.0.1")], lookup_id=a_id))
+        # 陈旧/重复回调不能再次消费队列。
+        a_callback(_FakeHostInfo([QHostAddress("127.0.0.1")], lookup_id=a_id))
+        b_callback(_FakeHostInfo([QHostAddress("127.0.0.1")], lookup_id=b_id))
+        assert process_events_until(lambda: len(sent) >= 3, timeout_ms=3000), sent
+        assert sorted(sent) == [b"a1", b"a2", b"b1"]
+    finally:
+        controller.close_udp()
+        receiver.close()

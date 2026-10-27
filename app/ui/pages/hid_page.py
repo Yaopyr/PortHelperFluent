@@ -285,7 +285,7 @@ class HidPage(QWidget):
             "发送区", "HEX 输入支持空格、逗号与 0x 前缀；Ctrl+Enter 发送"
         )
         self.send_editor = PlainTextEdit(send_card)
-        self.send_editor.setPlaceholderText("输入要发送的 HEX 数据，例如：01 02 03 04…")
+        self.send_editor.setPlaceholderText("输入要发送的数据（HEX 模式示例：01 02 03 04…）")
         font = QFont("Cascadia Mono")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(10)
@@ -667,7 +667,7 @@ class HidPage(QWidget):
             self._stop_repeat()
             return False
         if not payload:
-            show_warning(self, "没有数据", "请输入要发送的 HEX 数据。")
+            show_warning(self, "没有数据", "请输入要发送的数据。")
             return False
         report_id = self.report_id_spin.value()
         report_length = self.report_length_spin.value()

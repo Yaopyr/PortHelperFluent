@@ -234,3 +234,16 @@ def test_corrupt_loads_in_same_second_create_distinct_backups(
         "{ first",
         "{ second",
     }
+
+
+def test_page_encoding_falls_back_to_default(tmp_path):
+    from app.core.settings import Settings, resolve_page_encoding
+
+    settings = Settings(tmp_path / "config.json")
+    settings.set("ui.default_encoding", "gbk")
+    settings.set("serial.encoding", None)
+    settings.set("net.encoding", None)
+    assert resolve_page_encoding(settings, "serial.encoding") == "gbk"
+    assert resolve_page_encoding(settings, "net.encoding") == "gbk"
+    settings.set("serial.encoding", "utf-8")
+    assert resolve_page_encoding(settings, "serial.encoding") == "utf-8"

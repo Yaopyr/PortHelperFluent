@@ -35,7 +35,7 @@ from qfluentwidgets import (
 
 from app.core.encoding import encode_text, parse_hex, resolve_codec
 from app.core.logging_setup import get_logger
-from app.core.settings import Settings
+from app.core.settings import Settings, resolve_page_encoding
 from app.io.net_client import NetClientController
 from app.services.net_tools import adapter_info, ping_host, resolve_host
 from app.services.paths import AppPaths
@@ -361,6 +361,7 @@ class NetClientPage(QWidget):
         self.controller.udp_state_changed.connect(self._on_udp_state)
         self.controller.tcp_data.connect(self._on_tcp_data)
         self.controller.udp_data.connect(self._on_udp_data)
+        self.controller.udp_sent.connect(self._on_udp_sent)
         self.controller.error.connect(self._on_error)
 
     # ---- 设置 ---------------------------------------------------------
@@ -370,7 +371,7 @@ class NetClientPage(QWidget):
         self.port_spin.setValue(_int_or(self.settings.get("net.port", 8080), 8080))
         self.udp_port_spin.setValue(_int_or(self.settings.get("net.udp_port", 8080), 8080))
         _select_combo_value(
-            self.encoding_combo, ENCODING_ITEMS, self.settings.get("net.encoding", "utf-8")
+            self.encoding_combo, ENCODING_ITEMS, resolve_page_encoding(self.settings, "net.encoding")
         )
         self.hex_send_check.setChecked(bool(self.settings.get("net.hex_send", False)))
         for pane in (self.tcp_log, self.udp_log):
@@ -601,6 +602,12 @@ class NetClientPage(QWidget):
         self._refresh_counters()
 
     @safe_slot
+    def _on_udp_sent(self, data: bytes) -> None:
+        # 域名解析完成并真正写入套接字后才记 TX；解析失败不会留下假记录。
+        self.udp_log.append_bytes(data, "tx")
+        self._refresh_counters()
+
+    @safe_slot
     def _on_error(self, message: str) -> None:
         text = str(message)
         self._active_log().append_info(f"错误：{text}")
@@ -649,15 +656,15 @@ class NetClientPage(QWidget):
     def _transmit(self, mode: str, payload: bytes) -> bool:
         if mode == "tcp":
             ok = self.controller.send_tcp(payload)
-            pane = self.tcp_log
         else:
             target = self._udp_target()
             if target is None:
                 return False
-            ok = self.controller.send_udp(payload, *target)
-            pane = self.udp_log
+            # UDP 的 TX 日志由 controller.udp_sent 在真正写套接字后追加；
+            # 域名异步解析失败时不会误记一条已发送记录。
+            return bool(self.controller.send_udp(payload, *target))
         if ok:
-            pane.append_bytes(payload, "tx")
+            self.tcp_log.append_bytes(payload, "tx")
             self._refresh_counters()
         return bool(ok)
 

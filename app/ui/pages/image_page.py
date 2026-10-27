@@ -230,6 +230,13 @@ class ImagePage(QWidget):
         self.background_button.setFixedWidth(110)
         self.background_button.setToolTip("透明像素合成到该背景色")
         self.invert_check = CheckBox("反色（1 位）", params_card)
+        self.threshold_spin = SpinBox(params_card)
+        self.threshold_spin.setRange(0, 255)
+        self.threshold_spin.setValue(128)
+        self.threshold_spin.setFixedWidth(110)
+        self.threshold_spin.setToolTip("1 位输出：亮度 >= 阈值记为白，低于阈值记为黑")
+        self.threshold_spin.setEnabled(False)
+        self.threshold_spin.valueChanged.connect(self._on_parameter_changed)
         params_layout.addLayout(
             _control_row(
                 params_card,
@@ -250,6 +257,7 @@ class ImagePage(QWidget):
                     ("输出高", self.height_spin),
                     ("", self.lock_ratio_check),
                     ("背景色", self.background_button),
+                    ("1 位阈值", self.threshold_spin),
                     ("", self.invert_check),
                 ],
             )
@@ -333,6 +341,7 @@ class ImagePage(QWidget):
             self.height_spin.setValue(_safe_int(get("height", 0)))
             self.lock_ratio_check.setChecked(bool(get("lock_ratio", True)))
             self.invert_check.setChecked(bool(get("invert", False)))
+            self.threshold_spin.setValue(_safe_int(get("threshold", 128)))
             try:
                 self._background = hex_to_rgb(str(get("background", "#000000") or "#000000"))
             except ValueError:
@@ -361,6 +370,7 @@ class ImagePage(QWidget):
                     SETTINGS + "lock_ratio": bool(self.lock_ratio_check.isChecked()),
                     SETTINGS + "background": rgb_to_hex(self._background),
                     SETTINGS + "invert": bool(self.invert_check.isChecked()),
+                    SETTINGS + "threshold": int(self.threshold_spin.value()),
                     SETTINGS + "output_dir": self.output_dir_edit.text().strip(),
                     SETTINGS + "output_name": self.name_edit.text().strip(),
                 }
@@ -409,6 +419,7 @@ class ImagePage(QWidget):
             height=self.height_spin.value() or None,
             background=self._background,
             invert=bool(self.invert_check.isChecked()),
+            threshold=int(self.threshold_spin.value()),
         )
 
     def params(self) -> ImageParams:
@@ -427,6 +438,7 @@ class ImagePage(QWidget):
             self.height_spin.setValue(params.height or 0)
             self._background = tuple(params.background)
             self.invert_check.setChecked(bool(params.invert))
+            self.threshold_spin.setValue(int(params.threshold))
         finally:
             self._loading = False
         self._update_background_button()
@@ -454,6 +466,7 @@ class ImagePage(QWidget):
 
     def _refresh_control_state(self) -> None:
         self.byte_order_combo.setEnabled(self.depth() == 16)
+        self.threshold_spin.setEnabled(self.depth() == 1)
         self.cancel_button.setEnabled(self._batch_running)
 
     def _on_output_type_changed(self, *_args) -> None:

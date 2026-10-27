@@ -50,7 +50,7 @@ SUBTITLE = "外观、行为、数据目录与支持范围；修改后自动保�
 
 THEME_HINT = "主题与强调色立即生效；跟随系统会随 Windows 明暗模式变化。"
 BEHAVIOUR_HINT = (
-    "默认编码、显示行数与自动滚动在下次打开相关页面时生效；"
+    "默认编码、显示行数与自动滚动在下次启动应用时生效；主题与退出确认立即生效。"
     "退出确认立即生效；日志字体大小用于收发区等宽字体。"
 )
 
@@ -219,7 +219,7 @@ class SettingsPage(QWidget):
         self.log_font_spin.setRange(MIN_FONT_SIZE, MAX_FONT_SIZE)
         self.log_font_spin.setSuffix(" pt")
         self.log_font_spin.setFixedWidth(220)
-        self.log_font_spin.setToolTip("收发区等宽字体的字号，下次打开页面时生效")
+        self.log_font_spin.setToolTip("收发区等宽字体的字号，下次启动应用时生效")
         self.log_font_spin.valueChanged.connect(self._on_font_size_changed)
         grid.addWidget(self.log_font_spin, 4, 1)
 
