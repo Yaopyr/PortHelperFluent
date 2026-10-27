@@ -6,14 +6,25 @@ from PyQt6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, SegmentedWidget, TitleLabel
 
 from app.core.logging_setup import get_logger
+from app.ui.pages.convert.audio_tool import AudioTool
 from app.ui.pages.convert.base_tool import BaseTool
 from app.ui.pages.convert.data_tool import DataTool
+from app.ui.pages.convert.gif_tool import GifTool
+from app.ui.pages.convert.palette_tool import PaletteTool
+from app.ui.pages.convert.qr_tool import QrTool
 from app.ui.pages.convert.sevenseg_tool import SevenSegTool
 from app.ui.qt_utils import safe_slot
 
-# Task 8 只需在这里追加调色板/GIF/音频/二维码工具类，不用改页面壳。
 # 工具类契约：__init__(settings, paths, parent=...)；提供 title 与 route。
-TOOL_CLASSES: list[type[QWidget]] = [BaseTool, DataTool, SevenSegTool]
+TOOL_CLASSES: list[type[QWidget]] = [
+    BaseTool,
+    DataTool,
+    SevenSegTool,
+    PaletteTool,
+    GifTool,
+    AudioTool,
+    QrTool,
+]
 
 
 class ConvertPage(QWidget):
@@ -44,7 +55,8 @@ class ConvertPage(QWidget):
         self.title_label = TitleLabel("编码转换", self)
         root.addWidget(self.title_label)
         self.subtitle_label = CaptionLabel(
-            "进制转换、Bin/Hex/Text 文件转换与数码管字型码", self
+            "进制、Bin/Hex/Text、数码管、调色板、GIF、音频与二维码转换工具",
+            self,
         )
         self.subtitle_label.setWordWrap(True)
         root.addWidget(self.subtitle_label)

@@ -1,10 +1,14 @@
-"""编码转换页离屏测试：工具切换、进制转换、数码管与文件转换。"""
+"""编码转换页离屏测试：七个工具的切换、转换、导出与预览。"""
 
 from __future__ import annotations
 
+import array
+import math
+import wave
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from PyQt6.QtWidgets import QApplication
 
 from app.core.settings import Settings
@@ -16,6 +20,27 @@ from app.ui.pages.convert.data_tool import (
     OP_HEX_TO_BIN,
     OP_HEX_TO_TEXT,
 )
+
+
+_CREATED_PAGES: list = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_pages(qapp):
+    """测试结束后通过 Qt 删除页面，避免控件环在后续主题切换时被 GC 打断。"""
+    yield
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    while _CREATED_PAGES:
+        page = _CREATED_PAGES.pop()
+        try:
+            page.close()
+            page.deleteLater()
+        except RuntimeError:
+            # 页面可能已在测试内被删除。
+            pass
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
 
 
 def _make_page(tmp_path, monkeypatch):
@@ -31,6 +56,7 @@ def _make_page(tmp_path, monkeypatch):
         data_tool_module, "show_success", lambda *args: successes.append(args)
     )
     page = ConvertPage(settings, paths)
+    _CREATED_PAGES.append(page)
     page.show()
     return page, settings, paths, errors, successes
 
@@ -41,13 +67,29 @@ def test_page_metadata_registry_and_lifecycle(qapp, tmp_path, monkeypatch) -> No
         assert page.objectName() == "convert"
         assert page.title_label.text() == "编码转换"
         assert "进制" in page.subtitle_label.text()
-        assert page.tool_routes() == ("base", "data", "sevenseg")
-        assert page.tool_stack.count() == 3
+        assert page.tool_routes() == (
+            "base",
+            "data",
+            "sevenseg",
+            "palette",
+            "gif",
+            "audio",
+            "qr",
+        )
+        assert page.tool_stack.count() == 7
         assert page.current_tool_route() == "base"
         assert page.current_tool() is page.tools["base"]
         assert page.base_tool is page.tools["base"]
         assert page.data_tool is page.tools["data"]
         assert page.sevenseg_tool is page.tools["sevenseg"]
+        assert page.palette_tool is page.tools["palette"]
+        assert page.gif_tool is page.tools["gif"]
+        assert page.audio_tool is page.tools["audio"]
+        assert page.qr_tool is page.tools["qr"]
+        for route in ("palette", "gif", "audio", "qr"):
+            page.set_tool(route)
+            assert page.current_tool_route() == route
+            assert page.tool_stack.currentWidget() is page.tools[route]
         assert page.has_active_work() is False
         page.stop_workers()
         assert QApplication.activeModalWidget() is None
@@ -67,8 +109,13 @@ def test_switch_tool_updates_stack_and_setting(qapp, tmp_path, monkeypatch) -> N
         assert page.tool_stack.currentWidget() is page.tools["data"]
         assert settings.get("convert.last_tool") == "data"
 
+        page.set_tool("qr")
+        assert page.current_tool_route() == "qr"
+        assert page.tool_stack.currentWidget() is page.tools["qr"]
+        assert settings.get("convert.last_tool") == "qr"
+
         with pytest.raises(ValueError, match="未知"):
-            page.set_tool("palette")
+            page.set_tool("missing")
     finally:
         page.close()
 
@@ -85,6 +132,7 @@ def test_selected_tool_is_restored_from_settings(qapp, tmp_path, monkeypatch) ->
     assert reloaded.get("convert.last_tool") == "sevenseg"
 
     page2 = ConvertPage(reloaded, paths)
+    _CREATED_PAGES.append(page2)
     page2.show()
     try:
         assert page2.current_tool_route() == "sevenseg"
@@ -428,6 +476,253 @@ def test_data_tool_convert_button_reports_error_without_dialog(
 
         assert errors
         assert "十六进制" in str(errors[0])
+        assert QApplication.activeModalWidget() is None
+    finally:
+        page.close()
+
+
+# ---- Task 8：调色板、GIF、音频与二维码 ------------------------------------
+
+
+def _has_pixmap(label) -> bool:
+    pixmap = label.pixmap()
+    return pixmap is not None and not pixmap.isNull()
+
+
+def _write_page_gif(path: Path) -> None:
+    first = Image.new("RGB", (20, 10), (255, 0, 0))
+    second = Image.new("RGB", (20, 10), (0, 0, 255))
+    first.save(
+        path,
+        save_all=True,
+        append_images=[second],
+        duration=[100, 200],
+        loop=0,
+        disposal=2,
+    )
+
+
+def _write_page_wav(path: Path, seconds: float = 0.1, rate: int = 8000) -> int:
+    count = int(seconds * rate)
+    samples = array.array(
+        "h",
+        (
+            int(12000 * math.sin(2 * math.pi * 440 * index / rate))
+            for index in range(count)
+        ),
+    )
+    with wave.open(str(path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(rate)
+        writer.writeframes(samples.tobytes())
+    return count
+
+
+def test_palette_tool_live_conversion_errors_and_copy(
+    qapp, tmp_path, monkeypatch
+) -> None:
+    page, _settings, _paths, _errors, _successes = _make_page(tmp_path, monkeypatch)
+    try:
+        palette = page.tools["palette"]
+        palette.set_rgb(255, 0, 0)
+        assert palette.hex_value() == "#FF0000"
+        assert palette.output_values() == {
+            "hex": "#FF0000",
+            "rgb888": "0xFF0000",
+            "rgb565": "0xF800",
+            "rgb332": "0xE0",
+        }
+        assert "#FF0000" in palette.swatch_label.styleSheet()
+        assert palette.error_label.text() == ""
+        assert palette.hex_edit.isError() is False
+
+        palette.hex_edit.setText("#00FF00")
+        assert palette.current_rgb() == (0, 255, 0)
+        assert palette.output_values()["rgb565"] == "0x07E0"
+        assert palette.output_values()["rgb332"] == "0x1C"
+
+        palette.red_spin.setValue(0)
+        palette.green_spin.setValue(0)
+        palette.blue_spin.setValue(255)
+        assert palette.hex_value() == "#0000FF"
+        assert palette.output_values()["rgb565"] == "0x001F"
+
+        palette.copy_buttons["rgb565"].click()
+        assert QApplication.clipboard().text() == "0x001F"
+        assert "已复制" in palette.status_label.text()
+
+        palette.hex_edit.setText("GG")
+        assert palette.error_label.text()
+        assert palette.hex_edit.isError() is True
+        assert all(value == "" for value in palette.output_values().values())
+
+        palette.hex_edit.setText("#123456")
+        assert palette.error_label.text() == ""
+        assert palette.hex_edit.isError() is False
+        assert palette.output_values()["rgb888"] == "0x123456"
+        assert QApplication.activeModalWidget() is None
+    finally:
+        page.close()
+
+
+def test_gif_tool_load_preview_play_and_export(qapp, tmp_path, monkeypatch) -> None:
+    page, _settings, _paths, _errors, _successes = _make_page(tmp_path, monkeypatch)
+    try:
+        tool = page.tools["gif"]
+        source = tmp_path / "clip.gif"
+        _write_page_gif(source)
+
+        frames = tool.load(source)
+
+        assert len(frames) == 2
+        assert tool.frame_count() == 2
+        assert tool.frame_durations() == [100, 200]
+        assert (tool.gif_width, tool.gif_height) == (20, 10)
+        assert "2 帧" in tool.frame_info_label.text()
+        assert _has_pixmap(tool.preview_label)
+        assert "1 / 2" in tool.preview_caption.text()
+
+        tool.set_preview_index(1)
+        assert tool.current_frame_index() == 1
+        assert "2 / 2" in tool.preview_caption.text()
+
+        assert tool.play() is True
+        assert tool.is_playing() is True
+        tool.set_speed(200)
+        assert tool.speed() == 200
+        assert "200%" in tool.speed_label.text()
+        tool.pause()
+        assert tool.is_playing() is False
+
+        output = tmp_path / "frames"
+        written = tool.export(output, 10, 5)
+
+        assert [path.name for path in written] == ["clip_0001.bmp", "clip_0002.bmp"]
+        assert all(path.is_file() for path in written)
+        assert all(Image.open(path).size == (10, 5) for path in written)
+        assert tool.progress_bar.value() == 100
+        assert tool.error_label.text() == ""
+        assert "已导出 2" in tool.status_label.text()
+        assert list(output.glob("*.tmp")) == []
+        assert QApplication.activeModalWidget() is None
+    finally:
+        page.close()
+
+
+def test_gif_tool_reports_missing_file_inline(qapp, tmp_path, monkeypatch) -> None:
+    page, _settings, _paths, _errors, _successes = _make_page(tmp_path, monkeypatch)
+    try:
+        tool = page.tools["gif"]
+        with pytest.raises(ValueError, match="找不到"):
+            tool.load(tmp_path / "missing.gif")
+        assert tool.error_label.text()
+        assert tool.frame_count() == 0
+        with pytest.raises(ValueError, match="载入"):
+            tool.export(tmp_path / "out")
+        assert QApplication.activeModalWidget() is None
+    finally:
+        page.close()
+
+
+def test_audio_tool_load_info_and_export_c(qapp, tmp_path, monkeypatch) -> None:
+    page, settings, _paths, _errors, _successes = _make_page(tmp_path, monkeypatch)
+    try:
+        tool = page.tools["audio"]
+        source = tmp_path / "tone.wav"
+        samples = _write_page_wav(source)
+
+        audio = tool.load(source)
+
+        assert audio.sample_rate == 8000
+        assert len(audio.frames) == samples * 2
+        info = tool.format_info()
+        assert "WAV" in info
+        assert "8000 Hz" in info
+        assert "0.100" in info
+        assert tool.name_edit.text() == "tone"
+
+        c_path = tmp_path / "tone.c"
+        h_path = tmp_path / "tone.h"
+        result_c, result_h = tool.export_c(c_path, h_path)
+
+        assert result_c == c_path
+        assert result_h == h_path
+        source_text = c_path.read_text(encoding="utf-8")
+        header_text = h_path.read_text(encoding="utf-8")
+        assert "const unsigned char tone[]" in source_text
+        assert "tone_length = 800;" in source_text
+        assert "8000" in source_text
+        assert "extern const unsigned char tone[]" in header_text
+        assert tool.progress_bar.value() == 100
+        assert "已生成" in tool.status_label.text()
+        assert tool.error_label.text() == ""
+        assert settings.get("convert.audio.last_export") == str(tmp_path)
+        assert QApplication.activeModalWidget() is None
+    finally:
+        page.close()
+
+
+def test_audio_tool_invalid_format_and_missing_file(qapp, tmp_path, monkeypatch) -> None:
+    page, _settings, _paths, _errors, _successes = _make_page(tmp_path, monkeypatch)
+    try:
+        tool = page.tools["audio"]
+        unsupported = tmp_path / "sound.ogg"
+        unsupported.write_bytes(b"OggS")
+        with pytest.raises(ValueError, match="不支持"):
+            tool.load(unsupported)
+        assert tool.error_label.text()
+        assert tool.audio is None
+
+        with pytest.raises(ValueError, match="找不到"):
+            tool.load(tmp_path / "missing.wav")
+        with pytest.raises(ValueError, match="载入"):
+            tool.export_c(tmp_path / "out.c", tmp_path / "out.h")
+        assert QApplication.activeModalWidget() is None
+    finally:
+        page.close()
+
+
+def test_qr_tool_preview_colors_and_save(qapp, tmp_path, monkeypatch) -> None:
+    page, settings, _paths, _errors, _successes = _make_page(tmp_path, monkeypatch)
+    try:
+        tool = page.tools["qr"]
+        assert tool.preview_label.text()
+        assert not _has_pixmap(tool.preview_label)
+
+        tool.set_text("https://example.com/porthelper")
+        assert "已生成" in tool.status_label.text()
+        assert _has_pixmap(tool.preview_label)
+        image = tool.qr_image()
+        assert image.width == image.height
+        assert image.width >= (21 + 2 * 4) * 8
+
+        tool.ec_combo.setCurrentIndex(tool.ec_combo.findData("H"))
+        assert tool.ec() == "H"
+        tool.box_spin.setValue(4)
+        tool.border_spin.setValue(2)
+        assert tool.box_size() == 4
+        assert tool.border() == 2
+
+        tool.set_colors("#FF0000", "#0000FF")
+        assert tool.fg_color() == "#FF0000"
+        assert tool.bg_color() == "#0000FF"
+        assert tool.qr_image().getpixel((0, 0)) == (0, 0, 255, 255)
+
+        png_path = tmp_path / "preview.png"
+        bmp_path = tmp_path / "preview.bmp"
+        assert tool.save(png_path) == png_path
+        assert png_path.is_file()
+        assert tool.save(bmp_path) == bmp_path
+        assert bmp_path.is_file()
+        assert settings.get("convert.qr.last_path") == str(bmp_path)
+        with Image.open(png_path) as saved:
+            assert saved.size == tool.qr_image().size
+
+        tool.set_text("   ")
+        assert not _has_pixmap(tool.preview_label)
+        with pytest.raises(ValueError, match="不能为空"):
+            tool.save(tmp_path / "empty.png")
         assert QApplication.activeModalWidget() is None
     finally:
         page.close()
