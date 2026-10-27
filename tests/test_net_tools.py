@@ -47,3 +47,12 @@ def test_adapter_info_returns_list_with_expected_keys() -> None:
         )
         assert isinstance(item["addresses"], list)
         assert isinstance(item["isup"], bool)
+
+
+def test_default_gateways_returns_mapping() -> None:
+    from app.services.net_tools import _default_gateways
+
+    gateways = _default_gateways()
+    assert isinstance(gateways, dict)
+    for interface, gateway in gateways.items():
+        assert isinstance(interface, str) and isinstance(gateway, str)

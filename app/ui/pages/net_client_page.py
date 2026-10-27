@@ -963,7 +963,7 @@ class NetClientPage(QWidget):
         self._show_info_dialog(
             "网卡信息",
             text or "未检测到网卡信息。",
-            note="网关字段暂未读取，显示为“—”。",
+            note="网关来自系统默认路由（route print -4）。",
         )
 
     def _show_info_dialog(self, title: str, text: str, note: str = "") -> None:

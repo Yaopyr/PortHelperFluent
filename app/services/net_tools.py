@@ -6,6 +6,7 @@ Ping 一律调用系统 ping.exe，不使用原始套接字；DNS 使用标准�
 
 from __future__ import annotations
 
+import ipaddress
 import locale
 import socket
 import subprocess
@@ -95,6 +96,7 @@ def adapter_info() -> list[dict]:
         ) from exc
 
     link_family = getattr(psutil, "AF_LINK", None)
+    gateways = _default_gateways()
     result: list[dict] = []
     for name in sorted(addresses_by_name, key=str.lower):
         ipv4 = [
@@ -106,20 +108,33 @@ def adapter_info() -> list[dict]:
                 if item.family == link_family and item.address:
                     mac = item.address
                     break
+        addresses = [item.address for item in ipv4 if item.address]
         stat = stats_by_name.get(name)
         result.append(
             {
                 "name": str(name),
-                # psutil 不提供网关；保留空字符串，界面显示为“—”，
-                # 避免为了一个字段解析 ipconfig 而引入额外权限/编码问题。
-                "addresses": [item.address for item in ipv4 if item.address],
+                "addresses": addresses,
                 "netmask": ", ".join(item.netmask for item in ipv4 if item.netmask),
-                "gateway": "",
+                "gateway": _gateway_for(name, addresses, gateways),
                 "mac": mac,
                 "isup": bool(stat.isup) if stat is not None else False,
             }
         )
     return result
+
+
+def _gateway_for(name: str, addresses: list[str], gateways: dict[str, tuple[list[str], list[str]]]) -> str:
+    """按网卡名或 IPv4 地址匹配 GetAdaptersAddresses 的网关。"""
+    key = name.strip().lower()
+    entry = gateways.get(key)
+    if entry is None:
+        for candidate_name, (candidate_addresses, candidate_gateways) in gateways.items():
+            if set(addresses) & set(candidate_addresses):
+                entry = (candidate_addresses, candidate_gateways)
+                break
+    if entry is None:
+        return ""
+    return ", ".join(entry[1])
 
 
 def _decode_output(raw) -> str:
@@ -132,3 +147,46 @@ def _decode_output(raw) -> str:
         return str(raw)
     encoding = locale.getpreferredencoding(False) or "utf-8"
     return bytes(raw).decode(encoding, errors="replace")
+
+
+# ---- Windows 默认网关（route print -4，按接口 IP 映射） -------------------
+
+def _default_gateways() -> dict[str, str]:
+    """返回 {接口 IPv4: 默认网关}；解析失败时返回空字典。"""
+    if sys.platform != "win32":
+        return {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            ["route", "print", "-4"],
+            capture_output=True,
+            timeout=5,
+            creationflags=creationflags,
+        )
+        text = _decode_output(completed.stdout)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        destination, mask, gateway, interface = parts[:4]
+        if destination == "0.0.0.0" and mask == "0.0.0.0":
+            if _is_ipv4(gateway) and _is_ipv4(interface):
+                result[interface] = gateway
+    return result
+
+
+def _gateway_for(name: str, addresses: list[str], gateways: dict[str, str]) -> str:
+    """按网卡地址匹配默认路由的接口地址。"""
+    matched = sorted({gateways[address] for address in addresses if address in gateways})
+    return ", ".join(matched)
+
+
+def _is_ipv4(text: str) -> bool:
+    try:
+        ipaddress.IPv4Address(text)
+        return True
+    except ValueError:
+        return False
