@@ -1,4 +1,4 @@
-"""文本编码与十六进制文本解析，供串口、网络与导出共用。"""
+"""文本编码、十六进制文本、进制换算与七段数码管字型，供各页面共用。"""
 
 from __future__ import annotations
 
@@ -101,3 +101,244 @@ def _parse_prefixed_token(token: str) -> bytes:
 
 def to_hex(data: bytes, sep: str = " ") -> str:
     return sep.join(f"{byte:02X}" for byte in data)
+
+
+# ---------------------------------------------------------------------------
+# 进制转换
+# ---------------------------------------------------------------------------
+
+BASE_OUTPUT_BASES: tuple[int, ...] = (2, 8, 10, 16)
+_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_PREFIX_BY_BASE = {2: "0b", 8: "0o", 16: "0x"}
+
+
+def _validate_base(base: int) -> int:
+    if isinstance(base, bool) or not isinstance(base, int):
+        raise ValueError(f"进制必须是 2–36 的整数，收到 {base!r}")
+    if not 2 <= base <= 36:
+        raise ValueError(f"进制必须在 2–36 之间，收到 {base}")
+    return base
+
+
+def _validate_bits(bits: int) -> int:
+    if isinstance(bits, bool) or not isinstance(bits, int) or bits <= 0:
+        raise ValueError(f"位宽必须是正整数，收到 {bits!r}")
+    return bits
+
+
+def parse_int(text: str, base: int, bits: int = 32, signed: bool = False) -> int:
+    """按指定进制解析整数，并按位宽/符号语义返回数值。
+
+    支持可选的 ``+``/``-`` 符号以及与本进制匹配的 ``0b``/``0o``/``0x`` 前缀
+    （大小写均可）。无符号模式只接受 0 到 ``2**bits - 1``；有符号模式接受
+    ``-2**(bits-1)`` 到 ``2**bits - 1``，其中大于等于 ``2**(bits-1)`` 的输入
+    按二进制补码解释（例如 8 位的 ``0xFF`` 返回 ``-1``）。空输入、非法字符与
+    超出位宽都会抛出中文 ``ValueError``。
+    """
+    base = _validate_base(base)
+    bits = _validate_bits(bits)
+    if not isinstance(text, str):
+        raise ValueError("数值必须是文本")
+
+    original = text.strip()
+    if not original:
+        raise ValueError("数值不能为空，请输入要转换的数字。")
+
+    body = original
+    negative = False
+    if body[:1] in ("+", "-"):
+        negative = body[0] == "-"
+        body = body[1:].strip()
+        if not body:
+            raise ValueError(f"数值“{original}”缺少数字部分。")
+
+    prefix = _PREFIX_BY_BASE.get(base)
+    if prefix is not None and body[:2].lower() == prefix:
+        body = body[2:].strip()
+        if not body:
+            raise ValueError(f"数值“{original}”缺少数字部分。")
+
+    try:
+        value = int(body, base)
+    except ValueError as exc:
+        raise ValueError(
+            f"无法按 {base} 进制解析“{original}”，"
+            "请检查字符是否属于该进制或是否含有多余空格。"
+        ) from exc
+
+    if negative:
+        value = -value
+
+    limit = 1 << bits
+    if signed:
+        minimum = -(1 << (bits - 1))
+        if value < minimum or value > limit - 1:
+            raise ValueError(
+                f"数值 {value} 超出 {bits} 位有符号整数范围"
+                f"（{minimum} ~ {limit - 1}）。"
+            )
+        if value >= (1 << (bits - 1)):
+            value -= limit
+        return value
+
+    if value < 0 or value > limit - 1:
+        raise ValueError(
+            f"数值 {value} 超出 {bits} 位无符号整数范围（0 ~ {limit - 1}）。"
+        )
+    return value
+
+
+def _format_unsigned(value: int, base: int) -> str:
+    if value == 0:
+        return "0"
+    digits: list[str] = []
+    while value:
+        value, remainder = divmod(value, base)
+        digits.append(_DIGITS[remainder])
+    return "".join(reversed(digits))
+
+
+def format_int(value: int, base: int, bits: int = 32, signed: bool = False) -> str:
+    """按位宽掩码后输出指定进制的文本。
+
+    二进制/八进制/十六进制显示补码位模式并统一使用大写字母；十进制在有符号
+    模式下显示补码对应的负值，无符号模式下显示掩码后的数值。
+    """
+    base = _validate_base(base)
+    bits = _validate_bits(bits)
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"数值必须是整数，收到 {value!r}") from exc
+
+    mask = (1 << bits) - 1
+    masked = number & mask
+    if signed and base == 10 and masked >= (1 << (bits - 1)):
+        return str(masked - (1 << bits))
+    return _format_unsigned(masked, base)
+
+
+def base_outputs(
+    text: str, from_base: int, bits: int = 32, signed: bool = False
+) -> dict[int, str]:
+    """解析一次输入，返回二进制/八进制/十进制/十六进制四种输出。"""
+    value = parse_int(text, from_base, bits=bits, signed=signed)
+    return {
+        base: format_int(value, base, bits=bits, signed=signed)
+        for base in BASE_OUTPUT_BASES
+    }
+
+
+# ---------------------------------------------------------------------------
+# 七段数码管
+# ---------------------------------------------------------------------------
+
+SEVEN_SEGMENT_BIT_ORDER: tuple[str, ...] = (
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "dp",
+)
+SEVEN_SEGMENT_BITS: dict[str, int] = {
+    "a": 0x01,
+    "b": 0x02,
+    "c": 0x04,
+    "d": 0x08,
+    "e": 0x10,
+    "f": 0x20,
+    "g": 0x40,
+    "dp": 0x80,
+}
+
+# 段位 a=bit0、b=bit1……g=bit6、dp=bit7；0–9/A–F 不点亮小数点。
+SEVEN_SEG_COMMON_CATHODE: dict[str, int] = {
+    "0": 0x3F,
+    "1": 0x06,
+    "2": 0x5B,
+    "3": 0x4F,
+    "4": 0x66,
+    "5": 0x6D,
+    "6": 0x7D,
+    "7": 0x07,
+    "8": 0x7F,
+    "9": 0x6F,
+    "A": 0x77,
+    "B": 0x7C,
+    "C": 0x39,
+    "D": 0x5E,
+    "E": 0x79,
+    "F": 0x71,
+}
+
+
+def seven_segment_code(char: str, common_cathode: bool = True) -> int:
+    """返回单个字符 0–9/A–F 的七段字型码；共阳为共阴的 8 位按位取反。"""
+    if not isinstance(char, str):
+        raise ValueError("数码管输入必须是单个字符")
+    text = char.strip()
+    if len(text) != 1:
+        raise ValueError(f"请输入单个字符（0–9 或 A–F），收到“{char}”")
+    key = text.upper()
+    try:
+        code = SEVEN_SEG_COMMON_CATHODE[key]
+    except KeyError as exc:
+        raise ValueError(f"字符“{text}”没有七段字型码，只支持 0–9 与 A–F") from exc
+    return code if common_cathode else (~code) & 0xFF
+
+
+def seven_segment_segments(code: int, common_cathode: bool = True) -> list[str]:
+    """把字型码拆成点亮的段名列表（a–g/dp）；共阳输入会先按位取反。"""
+    try:
+        value = int(code) & 0xFF
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"字型码必须是整数，收到 {code!r}") from exc
+    if not common_cathode:
+        value = (~value) & 0xFF
+    return [
+        name
+        for name in SEVEN_SEGMENT_BIT_ORDER
+        if value & SEVEN_SEGMENT_BITS[name]
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Bin/Hex/Text 文件辅助
+# ---------------------------------------------------------------------------
+
+HEX_TEXT_BYTES_PER_LINE = 16
+
+
+def _bytes_to_hex_text(data: bytes) -> str:
+    """把字节格式化为大写十六进制文本，每行 16 字节、以空格分隔。"""
+    raw = bytes(data)
+    if not raw:
+        return ""
+    lines = [
+        " ".join(f"{byte:02X}" for byte in raw[start : start + HEX_TEXT_BYTES_PER_LINE])
+        for start in range(0, len(raw), HEX_TEXT_BYTES_PER_LINE)
+    ]
+    return "\n".join(lines)
+
+
+def bin_file_to_hex_text(data: bytes) -> str:
+    """二进制文件内容转大写十六进制文本（每行 16 字节）。"""
+    return _bytes_to_hex_text(data)
+
+
+def hex_text_to_bytes(text: str) -> bytes:
+    """十六进制文本转原始字节；语法与错误提示沿用 :func:`parse_hex`。"""
+    return parse_hex(text)
+
+
+def hex_text_to_text(text: str, codec: str) -> str:
+    """十六进制文本按指定编码解码为文本（无法解码的字节替换为 U+FFFD）。"""
+    return decode_bytes(hex_text_to_bytes(text), codec)
+
+
+def text_to_hex_text(data: bytes) -> str:
+    """字节内容转大写十六进制文本（每行 16 字节），与 Bin→Hex 格式一致。"""
+    return _bytes_to_hex_text(data)

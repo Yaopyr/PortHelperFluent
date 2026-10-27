@@ -1,22 +1,16 @@
-"""编码转换页（含七个子工具）占位。"""
+"""编码转换页：进制、Bin/Hex/Text 与数码管工具。"""
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QWidget
+from app.ui.pages.convert.base_tool import BaseTool
+from app.ui.pages.convert.data_tool import DataTool
+from app.ui.pages.convert.page import TOOL_CLASSES, ConvertPage
+from app.ui.pages.convert.sevenseg_tool import SevenSegTool
 
-from app.ui.pages.placeholder import PlaceholderPage
-
-
-class ConvertPage(PlaceholderPage):
-    def __init__(
-        self, settings=None, paths=None, parent: QWidget | None = None, **kwargs
-    ) -> None:
-        super().__init__(
-            "编码转换",
-            "进制转换、Bin/Hex/Text、数码管、调色板、GIF、音频与二维码将在后续任务中提供。",
-            route="convert",
-            settings=settings,
-            paths=paths,
-            parent=parent,
-            **kwargs,
-        )
+__all__ = [
+    "BaseTool",
+    "ConvertPage",
+    "DataTool",
+    "SevenSegTool",
+    "TOOL_CLASSES",
+]
