@@ -67,7 +67,20 @@ def test_selftest_cli_writes_ok_report(tmp_path: Path) -> None:
     assert payload["qt"]
     assert payload["qfluentwidgets"] == version("PyQt6-Fluent-Widgets")
     assert payload["version"] == "1.0.0"
-    assert set(payload) == {"ok", "errors", "python", "qt", "qfluentwidgets", "version"}
+    assert set(payload) == {
+        "ok",
+        "errors",
+        "python",
+        "qt",
+        "qfluentwidgets",
+        "version",
+        "resources",
+    }
+    # 打包自检必须能看出关键模块、qfluentwidgets 内置资源与图标是否随 exe 携带。
+    assert payload["resources"]["modules"]["hid"] is True
+    assert payload["resources"]["modules"]["qrcode"] is True
+    assert payload["resources"]["qfluentwidgets"] == "ok"
+    assert Path(payload["resources"]["icon"]).is_file()
     # 自检只写临时 APPDATA，并且真的初始化过日志。
     assert (appdata / "PortHelperFluent" / "logs" / "app.log").is_file()
 

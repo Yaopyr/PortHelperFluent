@@ -82,8 +82,9 @@ def run_selftest(report_path: Path | None = None) -> int:
     """
     errors: list[str] = []
     versions = {"qt": "", "qfluentwidgets": ""}
+    resources: dict[str, object] = {"modules": {}, "qfluentwidgets": "", "icon": ""}
     try:
-        _collect_selftest_errors(errors, versions)
+        _collect_selftest_errors(errors, versions, resources)
     except Exception as exc:  # 自检自身出错也必须给出可读报告
         errors.append(f"自检过程中出现未预期的错误：{exc!r}")
 
@@ -94,6 +95,9 @@ def run_selftest(report_path: Path | None = None) -> int:
         "qt": versions["qt"],
         "qfluentwidgets": versions["qfluentwidgets"],
         "version": APP_VERSION,
+        # 打包自检要能看出 hid/qrcode 等模块、qfluentwidgets 内置资源与图标
+        # 是否真的进了 exe，而不只是“进程退出码为 0”。
+        "resources": resources,
     }
 
     exit_code = 0 if not errors else 1
@@ -107,12 +111,21 @@ def run_selftest(report_path: Path | None = None) -> int:
     return exit_code
 
 
-def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> None:
+def _collect_selftest_errors(
+    errors: list[str],
+    versions: dict[str, str],
+    resources: dict[str, object],
+) -> None:
+    modules = resources["modules"]
+    assert isinstance(modules, dict)
     for module_name in REQUIRED_MODULES:
         try:
             importlib.import_module(module_name)
         except Exception as exc:  # 自检需要收集全部问题，不能遇到第一个就退出
+            modules[module_name] = False
             errors.append(f"依赖 {module_name} 导入失败：{exc}")
+        else:
+            modules[module_name] = True
 
     try:
         check_fluent_binding()
@@ -120,6 +133,7 @@ def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> Non
         errors.append(f"Qt 绑定自检失败：{exc}")
 
     _check_main_window_import(errors)
+    _check_bundled_resources(errors, resources)
 
     paths: AppPaths | None = None
     try:
@@ -135,6 +149,38 @@ def _collect_selftest_errors(errors: list[str], versions: dict[str, str]) -> Non
 
     versions["qt"] = _probe(_qt_version, errors, "PyQt6")
     versions["qfluentwidgets"] = _probe(_qfluentwidgets_version, errors, "PyQt6-Fluent-Widgets")
+
+
+def _check_bundled_resources(errors: list[str], resources: dict[str, object]) -> None:
+    """确认 qfluentwidgets 的 qrc 资源与应用图标在打包后仍可读取。
+
+    qfluentwidgets 的样式/图标/字体全部编译在 ``_rc.resource`` 里，PyInstaller
+    只要漏掉该模块或图标数据，窗口会白屏或没有图标却仍能启动；因此把这两项
+    纳入自检报告，而不是等用户看到空白界面。
+    """
+    try:
+        from PyQt6.QtCore import QFile
+        from qfluentwidgets import FluentIcon
+
+        if not QFile(":/qfluentwidgets/images/logo.png").exists():
+            raise FileNotFoundError("内置资源 :/qfluentwidgets/images/logo.png 不存在")
+        if FluentIcon.HOME.icon().isNull():
+            raise ValueError("FluentIcon.HOME 图标为空")
+    except Exception as exc:
+        errors.append(f"qfluentwidgets 资源不可用：{exc}")
+    else:
+        resources["qfluentwidgets"] = "ok"
+
+    try:
+        from app.ui.main_window import find_app_icon
+
+        icon_path = find_app_icon()
+        if icon_path is None:
+            raise FileNotFoundError("找不到 build/icon.ico（源码目录或打包内嵌）")
+    except Exception as exc:
+        errors.append(f"应用图标不可用：{exc}")
+    else:
+        resources["icon"] = str(icon_path)
 
 
 def _check_main_window_import(errors: list[str]) -> None:
