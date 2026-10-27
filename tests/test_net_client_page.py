@@ -94,10 +94,14 @@ def test_tcp_connect_send_receive_counters_and_disconnect(qapp, tmp_path) -> Non
 
         page.send_editor.setPlainText("hello")
         page.tcp_send_button.click()
+        # 同一日志面板同时记录 TX/RX；等待回环 RX 计数，而不是只看文本，
+        # 否则本地 TX 记录会提前满足文本条件，产生竞态。
+        assert process_events_until(
+            lambda: page.tcp_log.session().total_bytes("rx") == 5, timeout_ms=5000
+        )
         assert process_events_until(
             lambda: "hello" in page.tcp_log.log_view.toPlainText(), timeout_ms=5000
         )
-        assert page.tcp_log.session().total_bytes("rx") == 5
         assert page.tcp_log.session().total_bytes("tx") == 5
         assert "接收 5 B" in page.counter_label.text()
         assert "发送 5 B" in page.counter_label.text()
