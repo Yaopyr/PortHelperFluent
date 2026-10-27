@@ -20,6 +20,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ui.max_display_lines": 20000,
     "ui.auto_scroll": True,
     "ui.confirm_exit": True,
+    # 设置页的“默认编码/日志字体大小”在下次打开相关页面时生效。
+    "ui.default_encoding": "utf-8",
+    "ui.log_font_size": 10,
     "serial.port": "",
     "serial.baud": 115200,
     "serial.data_bits": 8,

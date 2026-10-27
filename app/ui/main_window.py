@@ -3,8 +3,19 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
-from PyQt6.QtCore import QByteArray
+from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
+from PyQt6.QtGui import (
+    QColor,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PyQt6.QtWidgets import QMessageBox, QWidget
 from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
 
@@ -68,6 +79,135 @@ def icon_for(name: str):
     return icon if icon is not None else FluentIcon.APPLICATION
 
 
+# ---- 应用图标 ---------------------------------------------------------
+
+APP_ICON_NAME = "icon.ico"
+APP_ICON_RELATIVE = Path("build") / APP_ICON_NAME
+FALLBACK_ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+
+def find_app_icon(*roots: Path | None) -> Path | None:
+    """按优先级查找 `build/icon.ico`；找不到时返回 None（调用方使用内置图标）。
+
+    查找顺序：显式传入的根目录（如 exe 目录）、PyInstaller 解包目录、仓库根目录
+    与当前工作目录。源码运行时仓库根目录一定命中；打包后若未携带图标则自然退回
+    内置图标，不会因为缺文件而启动失败。
+    """
+    candidates: list[Path] = []
+    for root in roots:
+        if root is not None:
+            candidates.append(Path(root))
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass))
+    candidates.append(Path(__file__).resolve().parents[2])
+    candidates.append(Path.cwd())
+
+    seen: set[Path] = set()
+    for root in candidates:
+        for relative in (APP_ICON_RELATIVE, Path(APP_ICON_NAME)):
+            path = (root / relative).resolve()
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                if path.is_file() and path.stat().st_size > 0:
+                    return path
+            except OSError:
+                continue
+    return None
+
+
+def app_icon(*roots: Path | None) -> QIcon:
+    """加载应用图标；ICO 缺失或损坏时退回代码绘制的小图标。"""
+    path = find_app_icon(*roots)
+    if path is not None:
+        try:
+            icon = QIcon(str(path))
+            if not icon.isNull() and icon.availableSizes():
+                return icon
+            get_logger().warning("图标文件无法解析，改用内置图标：%s", path)
+        except Exception:
+            get_logger().exception("加载图标文件失败，改用内置图标：%s", path)
+    return fallback_app_icon()
+
+
+def fallback_app_icon() -> QIcon:
+    """在没有 ICO（例如精简打包）时用 QPainter 绘制蓝色圆角方块图标。"""
+    try:
+        from PyQt6.QtGui import QGuiApplication
+
+        if QGuiApplication.instance() is None:
+            return QIcon()
+        icon = QIcon()
+        for size in FALLBACK_ICON_SIZES:
+            pixmap = _fallback_icon_pixmap(size)
+            if not pixmap.isNull():
+                icon.addPixmap(pixmap)
+        return icon
+    except Exception:
+        get_logger().exception("生成内置图标失败")
+        return QIcon()
+
+
+def _fallback_icon_pixmap(size: int) -> QPixmap:
+    """按 64×64 设计坐标绘制内置图标，保证任意 DPI 下都要么成功要么返回空位图。"""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter()
+    try:
+        if not painter.begin(pixmap):
+            return QPixmap()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        gradient = QLinearGradient(0, 0, 0, size)
+        gradient.setColorAt(0.0, QColor("#3A8CFF"))
+        gradient.setColorAt(1.0, QColor("#0947B4"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(QRectF(0, 0, size, size), size * 0.22, size * 0.22)
+
+        scale = size / 64.0
+        pen = QPen(QColor("#FFFFFF"))
+        pen.setWidthF(max(1.0, size * 0.055))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(12 * scale, 15 * scale, 40 * scale, 34 * scale),
+            5 * scale,
+            5 * scale,
+        )
+        painter.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(20 * scale, 25 * scale),
+                    QPointF(28 * scale, 32 * scale),
+                    QPointF(20 * scale, 39 * scale),
+                ]
+            )
+        )
+        painter.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(34 * scale, 32 * scale),
+                    QPointF(38 * scale, 32 * scale),
+                    QPointF(40 * scale, 28 * scale),
+                    QPointF(43 * scale, 37 * scale),
+                    QPointF(45 * scale, 32 * scale),
+                    QPointF(50 * scale, 32 * scale),
+                ]
+            )
+        )
+    except Exception:
+        get_logger().exception("绘制内置图标失败")
+        return QPixmap()
+    finally:
+        if painter.isActive():
+            painter.end()
+    return pixmap
+
+
 class MainWindow(FluentWindow):
     """应用主窗口；接收配置与生效路径，并转交给各页面。"""
 
@@ -85,6 +225,7 @@ class MainWindow(FluentWindow):
 
         self.setObjectName("mainWindow")
         self.setWindowTitle(f"{APP_TITLE} {APP_VERSION}")
+        self._apply_window_icon()
         self.setMinimumSize(1180, 760)
         self.resize(1280, 820)
         self._restore_geometry()
@@ -121,6 +262,13 @@ class MainWindow(FluentWindow):
         except Exception:
             get_logger().exception("应用主题失败，继续使用默认主题")
         self.enable_mica()
+
+    def _apply_window_icon(self) -> None:
+        """设置窗口图标；ICO 缺失时使用内置图标，绝不影响启动。"""
+        try:
+            self.setWindowIcon(app_icon(getattr(self._paths, "exe_dir", None)))
+        except Exception:
+            get_logger().exception("设置窗口图标失败，继续启动")
 
     def enable_mica(self) -> bool:
         """启用 Mica；失败只记日志，绝不阻塞启动。"""

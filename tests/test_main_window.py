@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QMessageBox, QWidget
 
 from app.core.settings import Settings
 from app.services.paths import AppPaths, resolve_paths
+from app.ui import main_window as main_window_module
 from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow
 
 
@@ -345,3 +346,42 @@ def test_app_version_has_single_source(window) -> None:
 
     assert app.APP_VERSION == main.APP_VERSION == DEFAULT_SETTINGS["app.version"] == "1.0.0"
     assert main_window.windowTitle() == f"{APP_TITLE} {app.APP_VERSION}"
+
+
+def test_app_icon_file_is_generated_and_loadable(qapp) -> None:
+    from PyQt6.QtGui import QIcon
+
+    path = main_window_module.find_app_icon()
+    if path is None:  # 精简打包环境可能没有 ICO，此时使用内置图标。
+        pytest.skip("build/icon.ico 不存在")
+    assert path.name == "icon.ico"
+    assert path.stat().st_size > 0
+
+    icon = QIcon(str(path))
+    assert not icon.isNull()
+    sizes = {size.width() for size in icon.availableSizes()}
+    assert {16, 32, 256} <= sizes
+
+
+def test_main_window_and_application_icons_are_not_null(window, qapp) -> None:
+    if main_window_module.find_app_icon() is None:
+        pytest.skip("build/icon.ico 不存在")
+    main_window, _settings, _paths = window
+
+    assert not main_window.windowIcon().isNull()
+
+    previous = qapp.windowIcon()
+    try:
+        qapp.setWindowIcon(main_window_module.app_icon())
+        assert not qapp.windowIcon().isNull()
+    finally:
+        qapp.setWindowIcon(previous)
+
+
+def test_fallback_icon_used_when_ico_is_missing(qapp, monkeypatch) -> None:
+    monkeypatch.setattr(main_window_module, "find_app_icon", lambda *roots: None)
+
+    icon = main_window_module.app_icon()
+
+    assert not icon.isNull()
+    assert icon.availableSizes()

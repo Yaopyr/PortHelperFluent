@@ -285,6 +285,14 @@ def _start_gui(
     except Exception as exc:
         return _handle_binding_failure(exc, paths.log_dir)
 
+    # 应用图标：优先 build/icon.ico，缺失时使用内置图标；失败不阻塞启动。
+    try:
+        from app.ui.main_window import app_icon
+
+        app.setWindowIcon(app_icon(paths.exe_dir))
+    except Exception:
+        logger.exception("设置应用图标失败，继续启动")
+
     window = create_main_window(settings, paths)
     if smoke_test and not window.smoke_test():
         logger.error("启动冒烟检查失败：主窗口页面未完整装配")

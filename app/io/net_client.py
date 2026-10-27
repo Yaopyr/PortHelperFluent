@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import weakref
+
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtNetwork import (
     QAbstractSocket,
@@ -38,6 +40,10 @@ class NetClientController(QObject):
         self._tcp_state = "disconnected"
         self._udp_state = "closed"
         self._remote = ("", 0)
+        # UDP 域名异步解析：缓存最近解析结果，避免每次发送都阻塞 GUI 线程。
+        self._address_cache: dict[str, QHostAddress] = {}
+        self._pending_udp: tuple[bytes, str, int] | None = None
+        self._lookup_id = 0
 
         self._tcp_socket = QTcpSocket(self)
         self._tcp_socket.connected.connect(self._on_tcp_connected)
@@ -154,11 +160,18 @@ class NetClientController(QObject):
         self._set_udp_state("bound")
 
     def close_udp(self) -> None:
+        self._cancel_host_lookup()
+        self._pending_udp = None
         if self._udp_socket.state() != _SOCKET_STATE.UnconnectedState:
             self._udp_socket.close()
         self._set_udp_state("closed")
 
     def send_udp(self, data: bytes, host: str, port: int) -> bool:
+        """发送 UDP 数据报；IP 直接发送，域名异步解析后由回调补发。
+
+        返回 True 表示“已接受发送请求”。域名首次发送时不会阻塞 GUI 线程：
+        解析完成后在事件循环中写套接字，解析失败通过 `error` 信号报告。
+        """
         payload = bytes(data)
         if not payload:
             self.error.emit("发送内容为空，请输入要发送的数据。")
@@ -173,12 +186,17 @@ class NetClientController(QObject):
         if not _valid_port(port, allow_zero=False):
             self.error.emit("目标端口无效，请输入 1–65535 之间的端口号。")
             return False
-        address = _resolve_address(host)
-        if address is None:
-            self.error.emit(
-                f"无法解析目标地址“{host}”。请检查地址拼写、网络连接或 DNS 设置。"
-            )
-            return False
+        target_port = int(port)
+
+        direct = QHostAddress(host)
+        if not direct.isNull():
+            return self._write_udp(payload, direct, target_port)
+        cached = self._address_cache.get(host.casefold())
+        if cached is not None:
+            return self._write_udp(payload, cached, target_port)
+        return self._start_host_lookup(payload, host, target_port)
+
+    def _write_udp(self, payload: bytes, address: QHostAddress, port: int) -> bool:
         written = self._udp_socket.writeDatagram(payload, address, int(port))
         if written < 0:
             self.error.emit(
@@ -193,6 +211,60 @@ class NetClientController(QObject):
             )
             return False
         return True
+
+    def _start_host_lookup(self, payload: bytes, host: str, port: int) -> bool:
+        """发起异步域名解析；只保留最近一次待发送数据，旧查询被取消。"""
+        self._cancel_host_lookup()
+        self._pending_udp = (payload, host, port)
+        controller_ref = weakref.ref(self)
+
+        def _finished(info: QHostInfo) -> None:
+            target = controller_ref()
+            if target is not None:
+                target._on_udp_host_resolved(info)
+
+        try:
+            self._lookup_id = _lookup_host_name(host, _finished)
+        except Exception:
+            get_logger().exception("发起域名解析失败：%s", host)
+            self._lookup_id = 0
+            self._pending_udp = None
+            self.error.emit(
+                f"无法解析目标地址“{host}”。请检查地址拼写、网络连接或 DNS 设置。"
+            )
+            return False
+        return True
+
+    def _cancel_host_lookup(self) -> None:
+        lookup_id, self._lookup_id = self._lookup_id, 0
+        if lookup_id > 0:
+            try:
+                QHostInfo.abortHostLookup(lookup_id)
+            except Exception:
+                get_logger().exception("取消域名解析失败：%s", lookup_id)
+
+    def _on_udp_host_resolved(self, info: QHostInfo) -> None:
+        """域名解析完成：缓存 IPv4 优先地址并补发待发送数据。"""
+        try:
+            self._lookup_id = 0
+            pending, self._pending_udp = self._pending_udp, None
+            if pending is None:
+                return
+            payload, host, port = pending
+            address = _address_from_info(info)
+            if address is None:
+                self.error.emit(
+                    f"无法解析目标地址“{host}”。请检查地址拼写、网络连接或 DNS 设置。"
+                )
+                return
+            self._address_cache[host.casefold()] = address
+            if self._udp_socket.state() != _SOCKET_STATE.BoundState:
+                # 解析期间用户关闭了 UDP：丢弃这次发送，不再打扰用户。
+                get_logger().warning("UDP 已关闭，丢弃解析完成后的待发送数据：%s", host)
+                return
+            self._write_udp(payload, address, port)
+        except Exception:
+            get_logger().exception("处理 UDP 域名解析结果失败")
 
     def is_udp_bound(self) -> bool:
         return self._udp_socket.state() == _SOCKET_STATE.BoundState
@@ -277,20 +349,21 @@ def _valid_port(port: int, *, allow_zero: bool) -> bool:
     return lower <= value <= 65535
 
 
-def _resolve_address(host: str) -> QHostAddress | None:
-    """把 IP 或域名解析为 QHostAddress；域名使用一次阻塞查询（用户主动发送时）。"""
-    direct = QHostAddress(host)
-    if not direct.isNull():
-        return direct
-    info = QHostInfo.fromName(host)
+def _lookup_host_name(host: str, callback) -> int:
+    """发起异步域名解析；独立成函数便于测试替换，不阻塞调用线程。"""
+    return int(QHostInfo.lookupHost(host, callback))
+
+
+def _address_from_info(info: QHostInfo) -> QHostAddress | None:
+    """从解析结果中选地址：优先 IPv4，与界面上的常规 IPv4 目标保持一致。"""
     if info.error() != QHostInfo.HostInfoError.NoError:
         return None
     addresses = [address for address in info.addresses() if not address.isNull()]
     if not addresses:
         return None
-    # 优先使用 IPv4，与界面上的常规 IPv4 目标保持一致。
     for address in addresses:
-        if "." in address.toString():
+        text = address.toString()
+        if "." in text and ":" not in text:
             return address
     return addresses[0]
 

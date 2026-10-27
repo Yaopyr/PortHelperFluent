@@ -47,6 +47,7 @@ from app.core.encoding import encode_text, parse_hex
 from app.core.logging_setup import get_logger
 from app.core.settings import Settings
 from app.services.paths import AppPaths
+from app.ui.dialogs.custom_crc_dialog import CustomCrcDialog
 from app.ui.feedback import show_error
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
@@ -152,6 +153,7 @@ class ChecksumPage(QWidget):
         self._results: list[ChecksumResult] = []
         self._file_task: _FileChecksumTask | None = None
         self._file_token = 0
+        self._crc_dialog: CustomCrcDialog | None = None
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
 
@@ -211,6 +213,12 @@ class ChecksumPage(QWidget):
         self.little_endian_check.toggled.connect(self._render_results)
         options.addWidget(self.little_endian_check)
         options.addStretch(1)
+        self.custom_crc_button = PushButton("自定义 CRC…", input_card)
+        self.custom_crc_button.setToolTip(
+            "按位宽、poly、init、xorout 与反射参数计算任意 8/16/32 位 CRC"
+        )
+        self.custom_crc_button.clicked.connect(self.open_custom_crc)
+        options.addWidget(self.custom_crc_button)
         self.compute_button = PrimaryPushButton("计算", input_card)
         self.compute_button.setToolTip("立即计算当前输入；文本/HEX 变化时也会自动计算")
         self.compute_button.clicked.connect(self._compute_clicked)
@@ -529,6 +537,20 @@ class ChecksumPage(QWidget):
         except KeyError:
             self.source_view.setPlainText(f"# 没有算法“{name}”的源码示例")
 
+    # ---- 自定义 CRC ---------------------------------------------------
+
+    @safe_slot
+    def open_custom_crc(self, *_args) -> CustomCrcDialog:
+        """打开（或复用）非模态的自定义 CRC 对话框，避免阻塞主窗口与测试。"""
+        dialog = self._crc_dialog
+        if dialog is None:
+            dialog = CustomCrcDialog(self)
+            self._crc_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
     # ---- 文件模式 -----------------------------------------------------
 
     @safe_slot
@@ -675,6 +697,8 @@ class ChecksumPage(QWidget):
     def closeEvent(self, event) -> None:
         self._save_encoding()
         self.stop_workers()
+        if self._crc_dialog is not None:
+            self._crc_dialog.close()
         super().closeEvent(event)
 
 

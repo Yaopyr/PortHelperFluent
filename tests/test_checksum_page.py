@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtTest import QTest
 
 from app.core.checksum import compute_all, format_value
 from app.core.settings import Settings
 from app.services.paths import resolve_paths
+from app.ui.dialogs.custom_crc_dialog import CustomCrcDialog, build_crc_params
 from app.ui.pages import checksum_page as checksum_page_module
 from app.ui.pages.checksum_page import ChecksumPage, _FileChecksumTask
 from app.ui.qt_utils import process_events_until
@@ -316,3 +318,110 @@ def test_active_work_and_stop_workers_cleanup(qapp, tmp_path, monkeypatch):
         assert process_events_until(lambda: page.status_chip.state != "busy", timeout_ms=3000)
     finally:
         page.close()
+
+
+# ---- 自定义 CRC ---------------------------------------------------------
+
+
+def _select_width(dialog: CustomCrcDialog, width: int) -> None:
+    index = dialog.width_combo.findData(width)
+    assert index >= 0
+    dialog.width_combo.setCurrentIndex(index)
+
+
+def _fill_ccitt_false(dialog: CustomCrcDialog) -> None:
+    _select_width(dialog, 16)
+    dialog.poly_edit.setText("1021")
+    dialog.init_edit.setText("FFFF")
+    dialog.xorout_edit.setText("0000")
+    dialog.refin_check.setChecked(False)
+    dialog.refout_check.setChecked(False)
+
+
+def test_custom_crc_button_opens_non_modal_dialog(qapp, tmp_path, monkeypatch):
+    page, _settings, _paths, _errors = _make_page(tmp_path, monkeypatch)
+    try:
+        page.custom_crc_button.click()
+        qapp.processEvents()
+
+        dialog = page._crc_dialog
+        assert isinstance(dialog, CustomCrcDialog)
+        assert dialog.isVisible() is True
+        assert dialog.windowTitle() == "自定义 CRC"
+
+        # 再次点击复用同一个对话框，不会叠加窗口。
+        page.custom_crc_button.click()
+        qapp.processEvents()
+        assert page._crc_dialog is dialog
+    finally:
+        page.close()
+
+
+def test_custom_crc_dialog_computes_known_crc16_ccitt_false(qapp):
+    dialog = CustomCrcDialog()
+    try:
+        dialog.show()
+        _fill_ccitt_false(dialog)
+        dialog.input_edit.setPlainText("123456789")
+
+        assert dialog.run_compute() == 0x29B1
+        assert dialog.result_hex() == "29B1"
+        assert "0x29B1" in dialog.result_label.text()
+        assert dialog.error_label.isVisible() is False
+
+        dialog.copy_result()
+        assert QApplication.clipboard().text() == "29B1"
+    finally:
+        dialog.close()
+
+
+def test_custom_crc_dialog_accepts_hex_input(qapp):
+    dialog = CustomCrcDialog()
+    try:
+        _fill_ccitt_false(dialog)
+        dialog.hex_check.setChecked(True)
+        dialog.input_edit.setPlainText("31 32 33 34 35 36 37 38 39")
+
+        assert dialog.run_compute() == 0x29B1
+    finally:
+        dialog.close()
+
+
+def test_custom_crc_dialog_rejects_invalid_poly_and_width(qapp):
+    dialog = CustomCrcDialog()
+    try:
+        _fill_ccitt_false(dialog)
+        dialog.input_edit.setPlainText("123456789")
+
+        dialog.poly_edit.setText("102G")
+        assert dialog.run_compute() is None
+        assert "十六进制" in dialog.error_label.text()
+        assert dialog.result_value() is None
+        assert dialog.copy_button.isEnabled() is False
+
+        dialog.poly_edit.setText("1FFFF")
+        assert dialog.run_compute() is None
+        assert "超出 16 位范围" in dialog.error_label.text()
+
+        with pytest.raises(ValueError) as error:
+            build_crc_params(12, "07", "00", "00", False, False)
+        assert "8/16/32" in str(error.value)
+
+        dialog.poly_edit.setText("1021")
+        dialog.init_edit.setText("")
+        assert dialog.run_compute() is None
+        assert "不能为空" in dialog.error_label.text()
+    finally:
+        dialog.close()
+
+
+def test_custom_crc_dialog_empty_text_input_is_rejected(qapp):
+    dialog = CustomCrcDialog()
+    try:
+        _fill_ccitt_false(dialog)
+        dialog.input_edit.setPlainText("")
+
+        assert dialog.run_compute() is None
+        assert "请输入" in dialog.error_label.text()
+    finally:
+        dialog.close()
