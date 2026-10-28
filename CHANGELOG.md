@@ -9,11 +9,11 @@
 ### Added
 
 - 在线更新：启动时静默检查（1.5 秒延时）与设置页手动检查，查询 `https://api.github.com/repos/Yaopyr/PortHelperFluent/releases/latest`，只认正式 Release。
-- 发现新版本时显示更新说明（Release notes）、版本号与安装包大小；「下载并安装」在后台下载并显示进度/百分比，可取消。
+- 发现新版本时显示更新说明（Release notes）、版本号与安装包大小；「下载并安装」在后台下载并显示进度/百分比，下载期间关闭窗口会中断下载。
 - 下载安全：仅允许 https 且主机在 GitHub 白名单内（重定向后的最终地址再校验一次），优先用 Release 元数据的 `sha256:` digest，否则下载 `SHA256.txt`；哈希不符立即删除文件并中止。
 - 安装方式：下载校验通过后确认一次，关闭程序（跳过退出确认、仍停止后台任务），由 ASCII PowerShell 脚本等待进程退出后原子替换 exe（跨卷回退 `Copy-Item`）并自动重启；失败写 `update.log` 并用备份回滚。
-- 更新文件（下载包、`.part`、备份、安装脚本、`update.log`）统一放在 `%APPDATA%\PortHelperFluent\updates`，exe 放在桌面时不会在桌面新增任何文件；便携模式落在 `data\updates`。
-- 设置页「更新」卡片：当前版本、启动时检查开关（`ui.check_updates_on_start`，关闭后不再发起任何更新请求）、状态与进度、下载并安装按钮。
+- 更新文件（下载包、`.part`、备份、安装脚本、`update.log`）统一放在 `%APPDATA%\PortHelperFluent\updates`，不会在 exe 所在目录（如桌面）留下文件；便携模式落在 `data\updates`。
+- 设置页「更新」卡片：当前版本、启动时检查开关（`ui.check_updates_on_start`，关闭后启动时不再检查、手动检查仍可用）、状态与进度、下载并安装按钮。
 - 源码运行时不执行替换，只提示已下载路径；程序目录不可写时拒绝自动安装并给出提示。
 - 682 项 pytest 测试；更新模块与安装器全部用注入的假 opener/假 popen 覆盖，不产生真实网络请求。
 

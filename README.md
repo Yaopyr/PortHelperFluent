@@ -118,9 +118,9 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 
 - **来源**：`https://github.com/Yaopyr/PortHelperFluent/releases/latest`（只认正式 Release，draft/prerelease 不参与）。
 - **校验**：只允许 https 且主机在 GitHub 白名单内（重定向后的最终地址再校验一次）；下载优先用 Release 元数据的 `sha256:` digest，缺失时下载 `SHA256.txt`，哈希不符立即删除文件并中止。
-- **文件位置**：下载包、`.part` 临时文件、旧版本备份、`apply-update.ps1` 与 `update.log` 都在 `%APPDATA%\PortHelperFluent\updates`——**exe 放在桌面时不会在桌面新增任何文件**。便携模式（`portable.flag`）下落在 `data\updates`。
+- **文件位置**：下载包、`.part` 临时文件、旧版本备份、`apply-update.ps1` 与 `update.log` 都在 `%APPDATA%\PortHelperFluent\updates`——不会在 exe 所在目录（如桌面）留下文件（可写性探针只在目录内短暂创建后立即删除）。便携模式（`portable.flag`）下落在 `data\updates`。
 - **安装**：确认后程序关闭（跳过退出确认，仍停止串口/网络/HID 等后台任务），由 PowerShell 脚本等待进程退出、替换 exe 并自动重启；失败写 `update.log` 并用备份回滚。
-- **触发**：启动 1.5 秒后静默检查一次，发现新版本时右上角提示；「设置 → 更新」可手动检查、「下载并安装」，也可用「启动时检查」开关关闭启动检查（关闭后不再发起任何更新请求）。
+- **触发**：启动 1.5 秒后静默检查一次，发现新版本时右上角提示；「设置 → 更新」可手动检查、「下载并安装」，也可用「启动时检查」开关关闭启动检查（关闭后启动时不再检查，手动检查仍可用）。
 - **源码运行**：`python main.py` 只检查与下载，不替换文件，按提示手动替换打包后的 exe；程序目录不可写（如 `Program Files`）时同样只提示已下载路径。
 
 ## 项目结构
@@ -130,7 +130,7 @@ porthelper-fluent/
 ├─ app/
 │  ├─ core/        # 纯 Python 算法：校验、编码、图像、字模、C51、配置、日志
 │  ├─ io/          # 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端
-│  ├─ services/    # 路径、导出、会话记录、Ping/DNS/网卡
+│  ├─ services/    # 路径、导出、会话记录、Ping/DNS/网卡、在线更新（updates · updater_install）
 │  └─ ui/          # Fluent 窗口、页面、通用控件、对话框、主题、统一布局容器
 ├─ analysis/       # 逆向文字证据与解析脚本（原始二进制/图片资源不提交）
 ├─ build/          # PyInstaller spec、构建脚本、图标、版本信息

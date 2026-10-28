@@ -17,7 +17,7 @@
 ```mermaid
 flowchart TB
     UI["ui/<br/>FluentWindow · 页面 · 控件 · 对话框"]
-    SVC["services/<br/>paths · settings · session_log · exports · net_tools"]
+    SVC["services/<br/>paths · settings · session_log · exports · net_tools<br/>updates · updater_install"]
     IO["io/<br/>serial_worker · hid_worker · net_client · net_server"]
     CORE["core/（Qt-free）<br/>encoding · checksum · color · imaging · fontmatrix · c51 · audio/gif/qr"]
     WIN["Windows / 第三方<br/>pyserial · hidapi · Qt Network · Pillow · numpy · qrcode · ffmpeg"]
@@ -162,10 +162,10 @@ IO 信号 → LogPane.append_bytes()
           exe → 写 update.log → Start-Process 重启
 ```
 
-- 检查分两种入口：启动静默检查由 `MainWindow.schedule_update_check()` 发起（受 `ui.check_updates_on_start`、smoke 与 `PORTHELPER_NO_UPDATE_CHECK` 约束，发现新版本只弹 InfoBar），手动检查由设置页「更新」卡片发起（失败弹警告）。单元测试不经过 `main._start_gui`，不会联网。
+- 检查分两种入口：启动静默检查由 `MainWindow.schedule_update_check()` 发起（条件：非 smoke、未设 `PORTHELPER_NO_DIALOGS` 与 `PORTHELPER_NO_UPDATE_CHECK`、设置项 `ui.check_updates_on_start` 为真；发现新版本只弹 InfoBar），手动检查由设置页「更新」卡片发起（失败弹警告）。单元测试不经过 `main._start_gui`，不会联网。
 - 下载只接受 https 与白名单主机（`github.com`/`*.githubusercontent.com`），重定向后的最终 URL 再校验一次；`requestInterruption()` 即取消，取消或异常都会删除 `.part`。
 - 安装脚本等进程退出后再替换：`[System.IO.File]::Replace` 要求源与目标同卷，跨卷失败时回退 `Copy-Item -Force`（同样只覆盖目标 exe，不在目标目录产生旁路文件）；替换失败用备份回滚并重启旧版，`update.log` 留证据。脚本正文纯 ASCII、以 UTF-8 BOM 落盘，避免 PowerShell 5.1 在非 ASCII 路径下乱码。
-- 更新相关文件（下载包、`.part`、备份、脚本、日志）都写在 `paths.data_dir/updates`：非便携模式即 `%APPDATA%\PortHelperFluent\updates`，exe 所在目录（例如桌面）零新增；便携模式按设计落 `data\updates`。
+- 更新相关文件（下载包、`.part`、备份、脚本、日志）都写在 `paths.data_dir/updates`：非便携模式即 `%APPDATA%\PortHelperFluent\updates`，不会在 exe 所在目录（如桌面）留下文件（可写性探针短暂创建后立即删除）；便携模式按设计落 `data\updates`。
 - 不用 `QThread` 承载更新任务：`fetcher` 里是阻塞的 urllib 读取，`requestInterruption()` 无法打断它；`wait()` 超时后窗口析构时线程仍在运行，Qt 会报 `QThread: Destroyed while thread is still running` 并 abort（0xC0000409）。因此改用 daemon `threading.Thread` 执行 `run()`，结果通过 QObject 的 `pyqtSignal` 排队投递回界面线程，`wait(ms)` 只做有限等待，退出时不会卡住进程。
 - 源码运行（`sys.frozen` 为假）只检查与下载，不执行替换，避免误替换 `python.exe`；目标目录不可写时同样不启动脚本。
 

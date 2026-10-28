@@ -108,7 +108,13 @@ python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work 
 内置更新器只读 `https://api.github.com/repos/Yaopyr/PortHelperFluent/releases/latest`，并按固定资产名下载，因此发布顺序不能省略任何一步。
 
 1. **版本一致性**：`app/__init__.py` 的 `APP_VERSION` 与 `build/version_info.txt` 的 `filevers`/`prodvers`/`FileVersion`/`ProductVersion` 必须是同一个版本（本项目为 `1.0.1`）；`CHANGELOG.md` 与 `README.md` 的测试计数同步更新。`version_info.txt` 是手工维护的独立副本，不会从 `APP_VERSION` 自动生成。
-2. **构建**：`powershell -ExecutionPolicy Bypass -File build/build.ps1`，确认全量测试通过、隔离目录 `--selftest`/`--smoke-test` 退出码为 0、`dist/SHA256.txt` 与 `dist/build.log` 记录的版本为 `1.0.1`。
+2. **构建**：`powershell -ExecutionPolicy Bypass -File build/build.ps1`，确认全量测试通过、隔离目录 `--selftest`/`--smoke-test` 退出码为 0，然后用下面命令确认 exe 里的版本资源：
+
+   ```powershell
+   (Get-Item dist\PortHelperFluent.exe).VersionInfo | Select-Object FileVersion, ProductVersion
+   ```
+
+   期望两者均为 `1.0.1`（或 `1.0.1.0`）。`dist/SHA256.txt` 只是 exe 的校验和、`dist/build.log` 是构建日志，两者都不含应用版本行，不能用来核对版本。
 3. **打标签**：
    ```powershell
    git tag -a v1.0.1 -m "PortHelper Fluent 1.0.1"
