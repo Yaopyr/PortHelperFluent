@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import QMessageBox, QWidget
 from app.core.settings import Settings
 from app.services.paths import AppPaths, resolve_paths
 from app.ui import main_window as main_window_module
-from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow
+from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow, _PAGE_SPECS
 
 
 @pytest.fixture
@@ -188,6 +188,31 @@ def test_navigation_headers_and_labels_are_in_expected_order(window) -> None:
         "C51 向导",
         "设置与关于",
     ]
+
+
+def test_navigation_expands_as_floating_panel(window, qapp) -> None:
+    from qfluentwidgets.components.navigation.navigation_panel import NavigationDisplayMode
+
+    main_window, _settings, _paths = window
+    main_window.show()
+    qapp.processEvents()
+    panel = main_window.navigationInterface.panel
+    stacked_rect = main_window.stackedWidget.geometry()
+    nav_width = main_window.navigationInterface.width()
+
+    main_window.navigationInterface.expand(useAni=False)
+    qapp.processEvents()
+
+    assert panel.displayMode == NavigationDisplayMode.MENU
+    assert panel.parent() is main_window
+    assert panel.isVisible()
+    assert main_window.stackedWidget.geometry() == stacked_rect
+    assert main_window.navigationInterface.width() == nav_width == 48
+
+
+def test_navigation_icons_are_unique() -> None:
+    unique_icons = {spec[2] for _header, specs in _PAGE_SPECS for spec in specs}
+    assert len(unique_icons) == len(PAGE_ROUTES) == 10
 
 
 def test_close_in_no_dialogs_mode_skips_question_and_stops_workers(

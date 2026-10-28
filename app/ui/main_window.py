@@ -39,6 +39,11 @@ APP_TITLE = "PortHelper Fluent"
 # 与 main.NO_DIALOGS_ENV 同一语义：无界面/自动测试环境不弹任何模态框。
 NO_DIALOGS_ENV = "PORTHELPER_NO_DIALOGS"
 
+# 导航面板始终以悬浮（MENU）模式展开：qfluentwidgets 在窗口足够宽时会把
+# 面板撑进布局、挤压页面内容；把“允许内嵌展开”的门槛抬到不可达即可让
+# 面板悬浮在页面上方，页面宽度保持不变。
+NAV_FLOAT_MIN_EXPAND_WIDTH = 1_000_000
+
 # (分组标题, ((路由, 页面类, 图标名, 导航文字), ...))
 _PAGE_SPECS = (
     (
@@ -47,13 +52,13 @@ _PAGE_SPECS = (
             ("serial", SerialPage, "CONNECT", "串口调试"),
             ("net-client", NetClientPage, "GLOBE", "网络调试"),
             ("net-server", NetServerPage, "IOT", "网络服务器"),
-            ("hid", HidPage, "DEVELOPER_TOOLS", "USB HID"),
+            ("hid", HidPage, "GAME", "USB HID"),
         ),
     ),
     (
         "工具",
         (
-            ("checksum", ChecksumPage, "CODE", "校验计算"),
+            ("checksum", ChecksumPage, "FINGERPRINT", "校验计算"),
             ("convert", ConvertPage, "CODE", "编码转换"),
             ("image", ImagePage, "PHOTO", "图片取模"),
             ("dotmatrix", DotMatrixPage, "FONT", "点阵生成"),
@@ -238,6 +243,7 @@ class MainWindow(FluentWindow):
     # ---- 装配 ---------------------------------------------------------
 
     def _build_navigation(self) -> None:
+        self.navigationInterface.setMinimumExpandWidth(NAV_FLOAT_MIN_EXPAND_WIDTH)
         for header, specs in _PAGE_SPECS:
             self.navigationInterface.addItemHeader(header, NavigationItemPosition.TOP)
             for route, page_class, icon_name, text in specs:
