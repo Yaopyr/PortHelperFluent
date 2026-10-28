@@ -80,11 +80,12 @@ flowchart TB
 
 | 模块 | 内容 |
 | --- | --- |
-| `main_window.py` | `FluentWindow`、分组导航、几何保存、关闭确认、图标 |
+| `main_window.py` | `FluentWindow`、分组导航、几何保存、关闭确认、图标、导航悬浮展开（不挤压页面） |
 | `theme.py` | 浅色/深色/跟随系统、强调色、Mica 探测 |
 | `qt_utils.py` | `safe_slot`、`readable_message`、`process_events_until`、Qt 消息处理器 |
 | `feedback.py` | InfoBar、错误非模态退路 |
 | `widgets/` | 日志面板、文件选择、HEX 输入、状态胶囊、卡片、矩阵视图 |
+| `widgets/page_layout.py` | 统一页面边距/间距、Fluent 纵向滚动容器、页面最小尺寸 1000×640、左右分栏侧栏最小宽 360 |
 | `dialogs/` | 会话记录、多项发送、文本信息、自定义 CRC |
 | `pages/` | 10 个页面；`convert/` 内含 7 个转换工具 |
 
@@ -180,7 +181,8 @@ IO 信号 → LogPane.append_bytes()
 1. 在 `app/ui/pages/` 创建 `QWidget` 页面，设置稳定 `objectName`，实现 `has_active_work()`/`stop_workers()`。
 2. 在 `app/ui/main_window.py` 的 `_PAGE_SPECS` 中注册路由、类、图标、导航文字。
 3. 页面构造契约：`page(settings, paths, parent=self)`；需要注入依赖时使用关键字参数。
-4. 通用逻辑放 `core`/`services`，不要复制到页面。
+4. 页面骨架用 `app/ui/widgets/page_layout.py`：`page_content()` 统一边距与间距，`scroll_container()` 包住可滚动内容，`apply_page_minimum(page)` 统一最小尺寸；左右分栏左栏宽度用 `PANEL_MIN_WIDTH`（360）。
+5. 通用逻辑放 `core`/`services`，不要复制到页面。
 
 ### 新增转换工具
 

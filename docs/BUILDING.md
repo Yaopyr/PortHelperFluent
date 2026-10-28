@@ -58,7 +58,7 @@ python -m pytest
 - 本地 TCP/UDP 回环、TCP 服务端多客户端、UDP 域名队列；
 - 串口/HID 假传输、页面离屏实例化、真实按钮点击。
 
-当前基线：**609 passed**。硬件 I/O、Keil 打开工程属于手工验收。
+当前基线：**623 passed**。硬件 I/O、Keil 打开工程属于手工验收。
 
 单独跑某类测试：
 
@@ -66,6 +66,7 @@ python -m pytest
 python -m pytest tests/test_serial_worker.py -v
 python -m pytest tests/test_net_client.py tests/test_net_server.py -v
 python -m pytest tests/test_imaging.py tests/test_fontmatrix.py tests/test_c51.py -v
+python -m pytest tests/test_ui_layout.py tests/test_main_window.py -v
 ```
 
 ## 构建单文件 exe
