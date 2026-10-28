@@ -472,8 +472,13 @@ def test_startup_update_check_respects_setting(window, monkeypatch) -> None:
         def connect(self, slot) -> None:
             self.slots.append(slot)
 
+        def emit(self, *_args) -> None:
+            for slot in list(self.slots):
+                slot()
+
     class FakeUpdateCheckWorker:
         def __init__(self, parent=None) -> None:
+            # 更新任务不再由窗口拥有（daemon 线程 + QObject 外壳）。
             self.parent_widget = parent
             self.checked = FakeSignal()
             self.failed = FakeSignal()
@@ -519,10 +524,14 @@ def test_startup_update_check_respects_setting(window, monkeypatch) -> None:
     scheduled[0][1]()
     assert len(created) == 1
     assert started == [True]
-    assert created[0].parent_widget is main_window
+    assert created[0].parent_widget is None
     # 已有检查线程时重复触发不会起第二个线程。
     main_window._silent_update_check()
     assert len(created) == 1
+
+    # finished 槽清空引用：之后的 stop_workers() 不再触碰已结束的任务。
+    created[0].finished.emit()
+    assert main_window._startup_update_worker is None
 
     main_window._on_startup_update_checked(_release("99.0.0"))
     assert infos == [("发现新版本 99.0.0", "可在「设置 → 更新」中查看并安装。")]

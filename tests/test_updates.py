@@ -561,21 +561,65 @@ def test_prune_updates_removes_stale_files_only(tmp_path: Path) -> None:
     assert backup.exists()
 
 
-# ---- 后台线程 ---------------------------------------------------------------
+# ---- 后台任务 ---------------------------------------------------------------
 
 
-def test_check_worker_emits_checked(qapp) -> None:
+def test_check_worker_emits_checked_and_finished(qapp) -> None:
     release = _release()
     worker = UpdateCheckWorker(fetcher=lambda: release)
     checked: list[object] = []
     failed: list[str] = []
+    finished: list[bool] = []
     worker.checked.connect(checked.append)
     worker.failed.connect(failed.append)
+    worker.finished.connect(lambda: finished.append(True))
 
-    worker.run()
+    worker.start()
 
+    assert worker.wait(3000) is True
+    assert worker.isRunning() is False
+    # 跨线程信号通过事件队列投递，处理一次事件循环后应收到 checked/finished。
+    assert process_events_until(lambda: bool(checked) and bool(finished), timeout_ms=1000)
     assert checked == [release]
     assert failed == []
+    assert finished == [True]
+
+
+def test_check_worker_runs_on_daemon_thread(qapp) -> None:
+    gate = threading.Event()
+
+    def fetcher():
+        gate.wait(5)
+        return _release()
+
+    worker = UpdateCheckWorker(fetcher=fetcher)
+    worker.start()
+
+    threads = [item for item in threading.enumerate() if item.name == "update-check"]
+    assert [item.daemon for item in threads] == [True]
+
+    gate.set()
+    assert worker.wait(3000) is True
+    assert worker.isRunning() is False
+
+
+def test_check_worker_start_is_idempotent_while_running(qapp) -> None:
+    gate = threading.Event()
+
+    def fetcher():
+        gate.wait(5)
+        return _release()
+
+    worker = UpdateCheckWorker(fetcher=fetcher)
+    worker.start()
+    worker.start()
+    worker.start()
+
+    names = [item.name for item in threading.enumerate() if item.name == "update-check"]
+    assert names == ["update-check"]
+
+    gate.set()
+    assert worker.wait(3000) is True
 
 
 def test_check_worker_reports_update_error(qapp) -> None:
@@ -620,9 +664,11 @@ def test_download_worker_emits_progress_and_path(qapp, tmp_path: Path) -> None:
     progress: list[tuple[int, int]] = []
     downloaded: list[object] = []
     failed: list[str] = []
+    finished: list[bool] = []
     worker.progress.connect(lambda received, total: progress.append((received, total)))
     worker.downloaded.connect(downloaded.append)
     worker.failed.connect(failed.append)
+    worker.finished.connect(lambda: finished.append(True))
 
     worker.run()
 
@@ -630,6 +676,8 @@ def test_download_worker_emits_progress_and_path(qapp, tmp_path: Path) -> None:
     assert progress == [(5, 10), (10, 10)]
     assert downloaded == [target]
     assert failed == []
+    # run() 被直接调用时不依赖线程状态，也不应发 finished（由外壳负责）。
+    assert finished == []
 
 
 def test_download_worker_reports_update_error(qapp, tmp_path: Path) -> None:
@@ -651,8 +699,7 @@ def test_download_worker_maps_interruption_to_cancel(qapp, tmp_path: Path) -> No
 
     def runner(release, work_dir, *, progress=None, cancel=None):
         started.set()
-        # 真调用传入的 cancel()：等待主线程 requestInterruption() 后应变为 True。
-        # （Qt 只在 worker 真正运行时记录中断请求，因此这里必须启动线程。）
+        # 真调用传入的 cancel()：requestInterruption() 置 threading.Event 后应变为 True。
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             if cancel():
@@ -664,17 +711,22 @@ def test_download_worker_maps_interruption_to_cancel(qapp, tmp_path: Path) -> No
 
     worker = UpdateDownloadWorker(_release(), tmp_path, runner=runner)
     failed: list[str] = []
+    finished: list[bool] = []
     worker.failed.connect(failed.append)
+    worker.finished.connect(lambda: finished.append(True))
 
     worker.start()
     try:
         assert started.wait(2)
         worker.requestInterruption()
-        assert worker.wait(3000)
+        assert worker.wait(3000) is True
+        assert worker.isRunning() is False
     finally:
+        # 例外路径也不留下仍在跑的线程。
         worker.wait(3000)
 
     assert observed == [True]
     # 跨线程的信号通过事件队列投递，等待期间处理一次事件循环。
-    assert process_events_until(lambda: failed, timeout_ms=1000)
+    assert process_events_until(lambda: bool(failed) and bool(finished), timeout_ms=1000)
     assert failed == ["下载已取消。"]
+    assert finished == [True]

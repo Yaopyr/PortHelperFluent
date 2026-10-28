@@ -354,12 +354,17 @@ class MainWindow(FluentWindow):
         """在后台检查最新版本；失败只写日志，绝不打断启动。"""
         if self._startup_update_worker is not None:
             return
-        worker = UpdateCheckWorker(parent=self)
+        worker = UpdateCheckWorker()
         worker.checked.connect(self._on_startup_update_checked)
         worker.failed.connect(lambda msg: get_logger().warning("检查更新失败：%s", msg))
+        worker.finished.connect(self._on_startup_check_finished)
         worker.finished.connect(worker.deleteLater)
         self._startup_update_worker = worker
         worker.start()
+
+    def _on_startup_check_finished(self) -> None:
+        """检查线程结束：清引用，避免 stop_workers() 触碰已销毁的对象。"""
+        self._startup_update_worker = None
 
     def _on_startup_update_checked(self, release) -> None:
         try:
@@ -370,9 +375,8 @@ class MainWindow(FluentWindow):
             get_logger().exception("处理启动更新检查结果失败")
 
     def prepare_for_update(self) -> None:
-        """更新安装前跳过退出确认，保存几何并关闭窗口（仍会停止后台任务）。"""
+        """更新安装前跳过退出确认并关闭窗口（几何由 closeEvent 统一保存）。"""
         self._skip_exit_confirm = True
-        self._save_geometry()
         self.close()
 
     def closeEvent(self, event) -> None:

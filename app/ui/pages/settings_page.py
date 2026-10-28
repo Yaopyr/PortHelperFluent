@@ -111,8 +111,9 @@ class SettingsPage(QWidget):
         self.extra_options = dict(kwargs)
         self._loading = True
         self.accent_hex = DEFAULT_ACCENT
-        # 更新状态：最后一次检查到的 Release、两个后台线程与下载环境。
+        # 更新状态：最后一次检查到的 Release、待安装快照与两个后台任务。
         self._release = None
+        self._pending_release = None
         self._check_worker = None
         self._download_worker = None
         self._work_dir: Path | None = None
@@ -682,7 +683,7 @@ class SettingsPage(QWidget):
             return
         self.check_update_button.setEnabled(False)
         self.update_status_label.setText("正在检查…")
-        worker = UpdateCheckWorker(parent=self)
+        worker = UpdateCheckWorker()
         worker.checked.connect(self._on_update_checked)
         worker.failed.connect(self._on_update_failed)
         worker.finished.connect(self._on_check_finished)
@@ -692,6 +693,7 @@ class SettingsPage(QWidget):
 
     @safe_slot
     def _on_check_finished(self, *_args) -> None:
+        self._check_worker = None
         self.check_update_button.setEnabled(True)
 
     @safe_slot
@@ -722,6 +724,11 @@ class SettingsPage(QWidget):
     @safe_slot
     def _on_update_failed(self, message, manual: bool = True) -> None:
         text = str(message or "").strip() or "未知错误"
+        # 失败时清掉上一次的更新结果，避免旧说明与安装按钮残留。
+        self._release = None
+        self.update_notes_edit.clear()
+        self.update_notes_edit.hide()
+        self.install_update_button.hide()
         self.update_status_label.setText(f"无法检查更新：{text}")
         if manual:
             show_warning(self, "检查更新失败", text)
@@ -731,6 +738,8 @@ class SettingsPage(QWidget):
     @safe_slot
     def _on_install_clicked(self, *_args) -> None:
         """下载前先确认能保存、能替换，避免留下无法安装的下载文件。"""
+        if _worker_running(self._download_worker):
+            return
         release = self._release
         if release is None:
             show_warning(self, "没有可安装的更新", "请先点击“检查更新”。")
@@ -757,17 +766,28 @@ class SettingsPage(QWidget):
             return
         self._work_dir = work_dir
         self._manual_install = not frozen
+        # 快照本次要安装的 release：下载期间若又检查到新版本，确认框仍按用户点击时
+        # 看到的版本来描述。
+        self._pending_release = release
         self.update_progress.setValue(0)
         self.update_progress.show()
         self.install_update_button.setEnabled(False)
+        self.check_update_button.setEnabled(False)
         self.update_status_label.setText("正在下载更新…")
-        worker = UpdateDownloadWorker(release, work_dir, parent=self)
+        worker = UpdateDownloadWorker(release, work_dir)
         worker.progress.connect(self._on_download_progress)
         worker.downloaded.connect(self._on_downloaded)
         worker.failed.connect(self._on_download_failed)
+        worker.finished.connect(self._on_download_finished)
         worker.finished.connect(worker.deleteLater)
         self._download_worker = worker
         worker.start()
+
+    @safe_slot
+    def _on_download_finished(self, *_args) -> None:
+        """下载线程结束（无论成败）：清引用并恢复检查按钮。"""
+        self._download_worker = None
+        self.check_update_button.setEnabled(True)
 
     @safe_slot
     def _on_download_progress(self, received: int, total: int) -> None:
@@ -803,7 +823,7 @@ class SettingsPage(QWidget):
             show_warning(self, "源码运行模式", "已下载后请手动替换打包后的 exe。")
             self._open_directory(downloaded.parent, "更新目录")
             return
-        version = str(getattr(self._release, "version", "") or "")
+        version = str(getattr(self._pending_release, "version", "") or "")
         answer = QMessageBox.question(
             self,
             UPDATE_INSTALL_CONFIRM_TITLE,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -329,15 +330,96 @@ def test_update_check_shows_newer_release_and_hides_when_current(page) -> None:
 def test_update_check_failure_reports_message(page) -> None:
     widget, _settings, _paths = page
     message = "无法连接 GitHub，请检查网络或代理设置。"
+    widget._on_update_checked(
+        ReleaseInfo(
+            version="99.0.0",
+            tag="v99.0.0",
+            title="",
+            notes="旧结果",
+            page_url=RELEASE_PAGE_URL,
+            published_at="",
+            exe=None,
+            checksum=None,
+        )
+    )
 
     widget._on_update_failed(message)
 
     assert widget.update_status_label.text() == f"无法检查更新：{message}"
+    # 失败后不保留上一次的更新说明与安装按钮。
+    assert widget._release is None
+    assert widget.update_notes_edit.isHidden() is True
+    assert widget.update_notes_edit.toPlainText() == ""
+    assert widget.install_update_button.isHidden() is True
 
     # 启动静默检查失败时只改状态文字，不弹提示。
     widget._on_update_failed("限流", manual=False)
 
     assert widget.update_status_label.text() == "无法检查更新：限流"
+
+
+def test_install_click_ignored_while_downloading(page, monkeypatch) -> None:
+    widget, _settings, _paths = page
+    widget._on_update_checked(
+        ReleaseInfo(
+            version="99.0.0",
+            tag="v99.0.0",
+            title="",
+            notes="",
+            page_url=RELEASE_PAGE_URL,
+            published_at="",
+            exe=ReleaseAsset(
+                name="PortHelperFluent.exe",
+                url="https://github.com/Yaopyr/PortHelperFluent/releases/download/exe",
+                size=1024,
+                digest="",
+            ),
+            checksum=None,
+        )
+    )
+
+    class RunningDownloadWorker:
+        def isRunning(self) -> bool:
+            return True
+
+    widget._download_worker = RunningDownloadWorker()
+    created: list[bool] = []
+    monkeypatch.setattr(
+        settings_page_module,
+        "UpdateDownloadWorker",
+        lambda *args, **kwargs: created.append(True),
+    )
+
+    widget._on_install_clicked()
+
+    assert created == []
+    assert widget.update_status_label.text().startswith("发现新版本 99.0.0")
+
+
+def test_stop_workers_does_not_wait_forever(page) -> None:
+    widget, _settings, _paths = page
+    calls: list[str] = []
+
+    class SlowWorker:
+        def requestInterruption(self) -> None:
+            calls.append("interrupt")
+
+        def wait(self, ms) -> bool:
+            calls.append(f"wait:{ms}")
+            return False
+
+    widget._check_worker = SlowWorker()
+    widget._download_worker = SlowWorker()
+
+    started = time.monotonic()
+    widget.stop_workers()
+    elapsed = time.monotonic() - started
+
+    # wait 超时也只等一次，不重试、不阻塞关闭。
+    assert calls == ["interrupt", "wait:2000", "interrupt", "wait:2000"]
+    assert elapsed < 1
+    assert widget._check_worker is None
+    assert widget._download_worker is None
 
 
 def test_settings_page_without_settings_or_paths_does_not_crash(qapp) -> None:
