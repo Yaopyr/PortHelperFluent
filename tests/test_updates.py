@@ -542,7 +542,7 @@ def test_prune_updates_removes_stale_files_only(tmp_path: Path) -> None:
     script.write_text("x", encoding="ascii")
     old_log = tmp_path / "update.log.old"
     old_log.write_text("x", encoding="ascii")
-    backup = tmp_path / f"backup-PortHelperFluent-1.0.0.exe"
+    backup = tmp_path / "backup-PortHelperFluent-1.0.0.exe"
     backup.write_bytes(b"backup")
     fresh = tmp_path / "PortHelperFluent-1.0.1.exe"
     fresh.write_bytes(b"fresh")
