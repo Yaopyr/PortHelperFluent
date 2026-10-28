@@ -55,6 +55,7 @@ from app.ui.feedback import show_error, show_success, show_warning
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.log_pane import LogPane
+from app.ui.widgets.page_layout import PANEL_MIN_WIDTH, apply_page_minimum, scroll_container
 from app.ui.widgets.status_chip import StatusChip
 
 SCOPE_NOTICE = "本程序支持标准 HID；CH372 需要厂商 DLL，不在支持范围"
@@ -79,6 +80,7 @@ class HidPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("hid")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -137,12 +139,11 @@ class HidPage(QWidget):
         splitter.addWidget(self._build_right_column())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([470, 760])
+        splitter.setSizes([PANEL_MIN_WIDTH, 900])
         root.addWidget(splitter, 1)
 
     def _build_left_column(self) -> QWidget:
         left = QWidget(self)
-        left.setMinimumWidth(430)
         layout = QVBoxLayout(left)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -259,7 +260,7 @@ class HidPage(QWidget):
         action_grid.addWidget(self.reset_counter_button, 1, 1)
         action_layout.addLayout(action_grid)
         layout.addWidget(action_card)
-        return left
+        return scroll_container(self, left, min_width=PANEL_MIN_WIDTH)
 
     def _build_right_column(self) -> QWidget:
         right = QWidget(self)

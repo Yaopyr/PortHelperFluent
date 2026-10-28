@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -12,7 +11,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -29,6 +27,7 @@ from qfluentwidgets import (
     ProgressBar,
     PushButton,
     SegmentedWidget,
+    SmoothScrollArea,
     SpinBox,
     TitleLabel,
     ToolButton,
@@ -53,6 +52,7 @@ from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.file_picker import FilePicker
 from app.ui.widgets.matrix_view import ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN, MatrixView
+from app.ui.widgets.page_layout import apply_page_minimum, page_content, scroll_container
 
 __all__ = ["DotMatrixPage", "resolve_font_file"]
 ERROR_COLOR = "#C42B1C"
@@ -119,6 +119,7 @@ class DotMatrixPage(QWidget):
     def __init__(self, settings=None, paths=None, parent: QWidget | None = None, **kwargs) -> None:
         super().__init__(parent)
         self.setObjectName("dotmatrix")
+        apply_page_minimum(self)
         self.settings, self.paths, self.extra_options = settings, paths, dict(kwargs)
         self._pages: list[Matrix] = []
         self._page_index = 0
@@ -141,19 +142,8 @@ class DotMatrixPage(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        content = QWidget(scroll)
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
-        root = QVBoxLayout(content)
-        root.setContentsMargins(24, 20, 24, 24)
-        root.setSpacing(12)
+        content, root = page_content(self)
+        outer.addWidget(scroll_container(self, content))
         self.title_label = TitleLabel("点阵生成", self)
         self.subtitle_label = CaptionLabel(
             "把文字或 BMP 转为可分页编辑的点阵，导出 C 数组、BIN 或批量 C 文件", self
@@ -200,7 +190,7 @@ class DotMatrixPage(QWidget):
             if index >= 0:
                 self.font_combo.setCurrentIndex(index)
                 break
-        self.font_combo.setFixedWidth(210)
+        self.font_combo.setFixedWidth(300)
         self.font_combo.setToolTip("选择系统字体；字体文件无法定位时回退到 Pillow 内置字体")
         self.size_spin = _spin(panel, 8, 64, 16, tip="字号（像素），同时决定每页字符宽度")
         self.bold_check = CheckBox("粗体", panel)
@@ -248,7 +238,7 @@ class DotMatrixPage(QWidget):
         left.setSpacing(6)
         self.matrix_view = MatrixView(card)
         self.view = self.matrix_view
-        self.preview_scroll = QScrollArea(card)
+        self.preview_scroll = SmoothScrollArea(card)
         self.preview_scroll.setWidgetResizable(False)
         self.preview_scroll.setFrameShape(QFrame.Shape.StyledPanel)
         self.preview_scroll.setMinimumHeight(250)
@@ -282,7 +272,7 @@ class DotMatrixPage(QWidget):
         card, layout = section_card("取模参数", "参数变化会刷新预览并自动保存。")
         self.scan_combo = _combo(card, SCAN_ITEMS, 140)
         self.direction_combo = _combo(card, DIRECTION_ITEMS, 130)
-        self.bit_order_combo = _combo(card, BIT_ORDER_ITEMS, 120)
+        self.bit_order_combo = _combo(card, BIT_ORDER_ITEMS, 130)
         self.page_chars_spin = _spin(card, 1, 64, 8, tip="每页按“字符数 × 字号”列宽分页")
         self.zoom_spin = _spin(card, ZOOM_MIN, ZOOM_MAX, ZOOM_DEFAULT, tip="每个点占用的像素数，也可在预览区滚轮缩放")
         layout.addLayout(_control_row(card, [
@@ -291,7 +281,7 @@ class DotMatrixPage(QWidget):
         self.dot_color_button = PushButton("#000000", card)
         self.background_button = PushButton("#FFFFFF", card)
         for button in (self.dot_color_button, self.background_button):
-            button.setFixedWidth(110)
+            button.setMinimumWidth(124)
         self.grid_check = CheckBox("显示网格", card)
         self.grid_check.setChecked(True)
         layout.addLayout(_control_row(card, [("点颜色", self.dot_color_button),

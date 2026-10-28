@@ -46,6 +46,7 @@ from app.ui.feedback import show_error, show_success, show_warning
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.log_pane import LogPane
+from app.ui.widgets.page_layout import PANEL_MIN_WIDTH, apply_page_minimum, scroll_container
 from app.ui.widgets.status_chip import StatusChip
 
 MODE_ITEMS = (("TCP 客户端", "tcp"), ("UDP", "udp"))
@@ -86,6 +87,7 @@ class NetClientPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("net-client")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -143,12 +145,11 @@ class NetClientPage(QWidget):
         splitter.addWidget(self._build_right_column())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([360, 880])
+        splitter.setSizes([PANEL_MIN_WIDTH, 900])
         root.addWidget(splitter, 1)
 
     def _build_left_column(self) -> QWidget:
         left = QWidget(self)
-        left.setMinimumWidth(330)
         layout = QVBoxLayout(left)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -248,7 +249,7 @@ class NetClientPage(QWidget):
         assist_layout.addLayout(tool_grid)
         layout.addWidget(assist_card)
         layout.addStretch(1)
-        return left
+        return scroll_container(self, left, min_width=PANEL_MIN_WIDTH)
 
     def _build_right_column(self) -> QWidget:
         right = QWidget(self)

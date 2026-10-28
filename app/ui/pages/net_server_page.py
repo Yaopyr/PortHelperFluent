@@ -46,6 +46,7 @@ from app.ui.feedback import show_error, show_success, show_warning
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.log_pane import LogPane
+from app.ui.widgets.page_layout import PANEL_MIN_WIDTH, apply_page_minimum, scroll_container
 from app.ui.widgets.status_chip import StatusChip
 
 ENCODING_ITEMS = (("ANSI（系统）", "ansi"), ("GBK", "gbk"), ("UTF-8", "utf-8"))
@@ -65,6 +66,7 @@ class NetServerPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("net-server")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -120,12 +122,11 @@ class NetServerPage(QWidget):
         splitter.addWidget(self._build_right_column())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([430, 810])
+        splitter.setSizes([PANEL_MIN_WIDTH, 900])
         root.addWidget(splitter, 1)
 
     def _build_left_column(self) -> QWidget:
         left = QWidget(self)
-        left.setMinimumWidth(400)
         layout = QVBoxLayout(left)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -216,7 +217,7 @@ class NetServerPage(QWidget):
         clients_footer.addWidget(self.disconnect_client_button)
         clients_layout.addLayout(clients_footer)
         layout.addWidget(clients_card, 1)
-        return left
+        return scroll_container(self, left, min_width=PANEL_MIN_WIDTH)
 
     def _build_right_column(self) -> QWidget:
         right = QWidget(self)
@@ -261,20 +262,25 @@ class NetServerPage(QWidget):
             self.encoding_combo.addItem(label)
         self.encoding_combo.currentIndexChanged.connect(self._settings_changed)
         options.addWidget(self.encoding_combo)
+        options.addStretch(1)
+        send_layout.addLayout(options)
+
+        delivery_options = QHBoxLayout()
+        delivery_options.setSpacing(12)
         self.broadcast_check = CheckBox("广播给全部客户端", send_card)
         self.broadcast_check.toggled.connect(self._update_send_controls)
-        options.addWidget(self.broadcast_check)
+        delivery_options.addWidget(self.broadcast_check)
         self.repeat_check = CheckBox("连续发送", send_card)
         self.repeat_check.toggled.connect(self._on_repeat_toggled)
-        options.addWidget(self.repeat_check)
+        delivery_options.addWidget(self.repeat_check)
         self.interval_spin = SpinBox(send_card)
         self.interval_spin.setRange(10, 60000)
         self.interval_spin.setValue(1000)
         self.interval_spin.setSuffix(" ms")
         self.interval_spin.valueChanged.connect(self._on_interval_changed)
-        options.addWidget(self.interval_spin)
-        options.addStretch(1)
-        send_layout.addLayout(options)
+        delivery_options.addWidget(self.interval_spin)
+        delivery_options.addStretch(1)
+        send_layout.addLayout(delivery_options)
 
         send_buttons = QHBoxLayout()
         send_buttons.setSpacing(8)

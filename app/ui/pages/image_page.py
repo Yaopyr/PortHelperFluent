@@ -11,9 +11,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QColorDialog,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
-    QScrollArea,
     QLabel,
     QVBoxLayout,
     QWidget,
@@ -51,6 +49,7 @@ from app.ui.feedback import show_error, show_success
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.file_picker import FilePicker
+from app.ui.widgets.page_layout import apply_page_minimum, page_content, scroll_container
 
 ERROR_COLOR = "#C42B1C"
 SETTINGS = "image."
@@ -124,6 +123,7 @@ class ImagePage(QWidget):
     def __init__(self, settings=None, paths=None, parent: QWidget | None = None, **kwargs) -> None:
         super().__init__(parent)
         self.setObjectName("image")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -150,19 +150,8 @@ class ImagePage(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        content = QWidget(scroll)
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
-        root = QVBoxLayout(content)
-        root.setContentsMargins(24, 20, 24, 24)
-        root.setSpacing(12)
+        content, root = page_content(self)
+        outer.addWidget(scroll_container(self, content))
         self.title_label = TitleLabel("图片取模", self)
         self.subtitle_label = CaptionLabel(
             "把位图转换为 C 数组、BIN 或 LVGL 图像描述，支持单张与文件夹批量导出", self
@@ -218,16 +207,18 @@ class ImagePage(QWidget):
         self.output_type_combo = _combo(params_card, OUTPUT_TYPE_ITEMS, 140)
         self.scan_combo = _combo(params_card, SCAN_ITEMS, 140)
         self.direction_combo = _combo(params_card, DIRECTION_ITEMS, 130)
-        self.depth_combo = _combo(params_card, DEPTH_ITEMS, 160)
+        self.depth_combo = _combo(params_card, DEPTH_ITEMS, 240)
         self.byte_order_combo = _combo(
             params_card, BYTE_ORDER_ITEMS, 180, "只影响 16 位 RGB565 的字节排列"
         )
+        self.byte_order_combo.setMaximumWidth(320)
+        self.byte_order_combo.setMinimumWidth(282)
         self.width_spin = _dimension_spin(params_card)
         self.height_spin = _dimension_spin(params_card)
         self.lock_ratio_check = CheckBox("锁定宽高比", params_card)
         self.lock_ratio_check.setChecked(True)
         self.background_button = PushButton("#000000", params_card)
-        self.background_button.setFixedWidth(110)
+        self.background_button.setMinimumWidth(124)
         self.background_button.setToolTip("透明像素合成到该背景色")
         self.invert_check = CheckBox("反色（1 位）", params_card)
         self.threshold_spin = SpinBox(params_card)
@@ -256,6 +247,13 @@ class ImagePage(QWidget):
                     ("输出宽", self.width_spin),
                     ("输出高", self.height_spin),
                     ("", self.lock_ratio_check),
+                ],
+            )
+        )
+        params_layout.addLayout(
+            _control_row(
+                params_card,
+                [
                     ("背景色", self.background_button),
                     ("1 位阈值", self.threshold_spin),
                     ("", self.invert_check),

@@ -10,10 +10,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QFileDialog,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
-    QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -49,6 +47,7 @@ from app.ui.feedback import show_error, show_success, show_warning
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.log_pane import LogPane
+from app.ui.widgets.page_layout import PANEL_MIN_WIDTH, apply_page_minimum, scroll_container
 from app.ui.widgets.status_chip import StatusChip
 
 BAUD_CHOICES = ("300", "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600")
@@ -74,6 +73,7 @@ class SerialPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("serial")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.worker_factory = worker_factory
@@ -124,13 +124,12 @@ class SerialPage(QWidget):
         splitter.addWidget(self._build_right_column())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([350, 890])
+        splitter.setSizes([PANEL_MIN_WIDTH, 900])
         root.addWidget(splitter, 1)
 
     def _build_left_column(self) -> QWidget:
         # 左栏内容高于窗口时允许滚动，避免卡片把下拉框压扁造成重叠。
         content = QWidget(self)
-        content.setMinimumWidth(320)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -245,13 +244,7 @@ class SerialPage(QWidget):
         layout.addWidget(action_card)
         layout.addStretch(1)
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(content)
-        scroll.setMinimumWidth(320)
-        return scroll
+        return scroll_container(self, content, min_width=PANEL_MIN_WIDTH)
 
     def _build_right_column(self) -> QWidget:
         right = QWidget(self)

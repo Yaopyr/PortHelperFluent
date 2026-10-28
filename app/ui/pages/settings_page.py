@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QMessageBox,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +36,7 @@ from app.ui.feedback import show_error, show_success, show_warning
 from app.ui.qt_utils import safe_slot
 from app.ui.theme import DEFAULT_ACCENT, apply_theme
 from app.ui.widgets.cards import section_card
+from app.ui.widgets.page_layout import apply_page_minimum, page_content, scroll_container
 
 MIN_DISPLAY_LINES = 1000
 MAX_DISPLAY_LINES = 100_000
@@ -89,6 +89,7 @@ class SettingsPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settings")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -104,21 +105,8 @@ class SettingsPage(QWidget):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        content = QWidget(scroll)
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
-
-        root = QVBoxLayout(content)
-        root.setContentsMargins(24, 20, 24, 24)
-        root.setSpacing(14)
+        content, root = page_content(self)
+        outer.addWidget(scroll_container(self, content))
 
         header = QHBoxLayout()
         header.setSpacing(12)

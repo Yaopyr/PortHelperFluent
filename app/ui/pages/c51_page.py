@@ -6,8 +6,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QRegularExpression
 from PyQt6.QtGui import (QColor, QFont, QKeySequence, QShortcut, QSyntaxHighlighter, QTextCharFormat)
-from PyQt6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-                             QScrollArea, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayout,
+                             QVBoxLayout, QWidget)
 from qfluentwidgets import (BodyLabel, CaptionLabel, CheckBox, ComboBox, DoubleSpinBox,
                             FluentIcon, LineEdit, PlainTextEdit, PrimaryPushButton, PushButton,
                             SpinBox, SwitchButton, TitleLabel, ToolButton)
@@ -20,6 +20,7 @@ from app.services.exports import write_text_atomic
 from app.ui.feedback import show_error, show_success
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
+from app.ui.widgets.page_layout import PANEL_MIN_WIDTH, apply_page_minimum, scroll_container
 
 SETTINGS_PREFIX = "c51."
 ERROR_COLOR = "#C42B1C"
@@ -110,6 +111,7 @@ class C51Page(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("c51")
+        apply_page_minimum(self)
         self.settings, self.paths, self.extra_options = settings, paths, dict(kwargs)
         self._loading = True
         self.timer_mode_combos: list[ComboBox] = []
@@ -144,16 +146,7 @@ class C51Page(QWidget):
 
         body = QHBoxLayout()
         body.setSpacing(12)
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            " QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        content = QWidget(scroll)
-        scroll.setWidget(content)
+        content = QWidget(self)
         left = QVBoxLayout(content)
         left.setContentsMargins(0, 0, 8, 0)
         left.setSpacing(12)
@@ -163,13 +156,14 @@ class C51Page(QWidget):
         left.addWidget(self._build_timers_card())
         left.addWidget(self._build_serial_card())
         left.addStretch(1)
-        body.addWidget(scroll, 3)
+        body.addWidget(scroll_container(self, content, min_width=PANEL_MIN_WIDTH), 3)
 
-        right = QVBoxLayout()
+        right_content = QWidget(self)
+        right = QVBoxLayout(right_content)
         right.setSpacing(12)
         right.addWidget(self._build_code_card(), 1)
         right.addWidget(self._build_warning_card())
-        body.addLayout(right, 2)
+        body.addWidget(scroll_container(self, right_content), 2)
         outer.addLayout(body, 1)
 
         self._connect_signals()
@@ -188,16 +182,20 @@ class C51Page(QWidget):
         row.setSpacing(8)
         row.addWidget(BodyLabel("晶振", card))
         row.addWidget(self.crystal_spin)
+        row.addStretch(1)
+        layout.addLayout(row)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
         self.preset_buttons: list[PushButton] = []
         self.crystal_presets = (11.0592, 12.0, 24.0)
         for value in self.crystal_presets:
             button = PushButton(f"{value:g} MHz", card)
-            button.setFixedWidth(100)
+            button.setFixedWidth(180)
             button.setToolTip(f"使用 {value:g} MHz 晶振")
-            row.addWidget(button)
+            preset_row.addWidget(button)
             self.preset_buttons.append(button)
-        row.addStretch(1)
-        layout.addLayout(row)
+        preset_row.addStretch(1)
+        layout.addLayout(preset_row)
         self.double_speed_switch = SwitchButton(card)
         self.power_combo = _combo(card, POWER_ITEMS, 140)
         self.delay_spin = _spin(card, 0, MAX_TIMER_US, 0, 170, suffix=" µs")
@@ -207,6 +205,13 @@ class C51Page(QWidget):
                 [
                     ("6T 倍速", self.double_speed_switch),
                     ("功耗模式", self.power_combo),
+                ],
+            )
+        )
+        layout.addLayout(
+            _control_row(
+                card,
+                [
                     ("软件延时", self.delay_spin),
                 ],
             )
@@ -291,7 +296,7 @@ class C51Page(QWidget):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(4)
         for index in range(3):
-            grid.addWidget(self._build_timer_block(card, index), 0, index)
+            grid.addWidget(self._build_timer_block(card, index), index // 2, index % 2)
         layout.addLayout(grid)
         return card
 
@@ -303,7 +308,8 @@ class C51Page(QWidget):
         title = BodyLabel(f"定时器 {index}", block)
         title.setStyleSheet("font-weight: 600;")
         layout.addWidget(title)
-        mode = _combo(block, TIMER_MODE_ITEMS[index], 150)
+        # 方式下拉框按最长选项（方式 2（8 位自动重装））留足宽度，避免选中后被裁切。
+        mode = _combo(block, TIMER_MODE_ITEMS[index], 160 if index == 2 else 226)
         layout.addWidget(mode)
         self.timer_mode_combos.append(mode)
         checks = QHBoxLayout()
@@ -351,7 +357,7 @@ class C51Page(QWidget):
     def _build_serial_card(self) -> QWidget:
         card, layout = section_card("串口与波特率",
                                     "方式 1/3 使用定时器 1 或定时器 2 产生波特率；实际波特率与误差会实时显示。")
-        self.serial_mode_combo = _combo(card, SERIAL_MODE_ITEMS, 170)
+        self.serial_mode_combo = _combo(card, SERIAL_MODE_ITEMS, 240)
         self.baud_spin = _spin(card, 300, 4_000_000, 9600, 150)
         self.baud_spin.setSingleStep(100)
         self.generator_combo = _combo(card, GENERATOR_ITEMS, 120)
@@ -360,6 +366,13 @@ class C51Page(QWidget):
                 card,
                 [
                     ("方式", self.serial_mode_combo),
+                ],
+            )
+        )
+        layout.addLayout(
+            _control_row(
+                card,
+                [
                     ("波特率 (bps)", self.baud_spin),
                     ("发生器", self.generator_combo),
                 ],

@@ -14,6 +14,7 @@ from app.ui.pages.convert.palette_tool import PaletteTool
 from app.ui.pages.convert.qr_tool import QrTool
 from app.ui.pages.convert.sevenseg_tool import SevenSegTool
 from app.ui.qt_utils import safe_slot
+from app.ui.widgets.page_layout import apply_page_minimum, scroll_container
 
 # 工具类契约：__init__(settings, paths, parent=...)；提供 title 与 route。
 TOOL_CLASSES: list[type[QWidget]] = [
@@ -39,6 +40,7 @@ class ConvertPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("convert")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -77,7 +79,7 @@ class ConvertPage(QWidget):
             setattr(self, f"{route}_tool", tool)
 
         root.addWidget(self.tool_switch)
-        root.addWidget(self.tool_stack, 1)
+        root.addWidget(scroll_container(self, self.tool_stack), 1)
 
         route = self._restore_route()
         if route:

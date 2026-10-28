@@ -52,6 +52,7 @@ from app.ui.feedback import show_error
 from app.ui.qt_utils import safe_slot
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.file_picker import FilePicker
+from app.ui.widgets.page_layout import apply_page_minimum, scroll_container
 from app.ui.widgets.status_chip import StatusChip
 
 MODE_TEXT = "text"
@@ -145,6 +146,7 @@ class ChecksumPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("checksum")
+        apply_page_minimum(self)
         self.settings = settings
         self.paths = paths
         self.extra_options = dict(kwargs)
@@ -231,7 +233,7 @@ class ChecksumPage(QWidget):
         splitter.addWidget(self._build_results_card())
         splitter.addWidget(self._build_source_card())
         splitter.setSizes([380, 250])
-        root.addWidget(splitter, 1)
+        root.addWidget(scroll_container(self, splitter), 1)
 
     def _build_text_panel(self) -> QWidget:
         panel = QWidget(self.mode_stack)
