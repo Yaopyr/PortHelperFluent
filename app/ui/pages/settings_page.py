@@ -1,8 +1,9 @@
-"""设置与关于页：外观/行为偏好、数据目录入口与支持范围说明。"""
+"""设置与关于页：外观/行为偏好、在线更新、数据目录入口与支持范围说明。"""
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
@@ -14,6 +15,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QMessageBox,
+    QPlainTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +24,8 @@ from qfluentwidgets import (
     CaptionLabel,
     ComboBox,
     LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
     PushButton,
     SpinBox,
     SwitchButton,
@@ -31,9 +35,12 @@ from qfluentwidgets import (
 from app import APP_VERSION
 from app.core.logging_setup import get_logger
 from app.core.settings import DEFAULT_SETTINGS
+from app.io.update_worker import UpdateCheckWorker, UpdateDownloadWorker
 from app.services.exports import write_text_atomic
+from app.services.updater_install import can_replace, install_update
+from app.services.updates import is_newer, prune_updates, updates_dir
 from app.ui.feedback import show_error, show_success, show_warning
-from app.ui.qt_utils import safe_slot
+from app.ui.qt_utils import readable_message, safe_slot
 from app.ui.theme import DEFAULT_ACCENT, apply_theme
 from app.ui.widgets.cards import section_card
 from app.ui.widgets.page_layout import apply_page_minimum, page_content, scroll_container
@@ -58,9 +65,18 @@ UNSUPPORTED_ITEMS = (
     ("蓝牙调试", "原程序依赖独立的蓝牙助手程序与系统配对流程。"),
     ("内核串口监视", "需要 32 位内核驱动，安装与卸载具有系统侵入性。"),
     ("CH372", "依赖厂商 DLL，纯 Python 单文件无法可靠复刻。"),
-    ("在线更新", "不内置原更新链路，不提供自动更新或外部下载。"),
     ("Keil 配色替换", "会修改外部 Keil 配置，本项目不做。"),
 )
+
+UPDATE_HINT = "只从 GitHub Releases 下载更新并校验 SHA-256；更新文件保存在数据目录下的 updates。"
+UPDATE_IDLE_TEXT = "尚未检查。"
+UPDATE_NOTES_MAX_CHARS = 4000
+UPDATE_NOTES_HEIGHT = 120
+UPDATE_INSTALL_QUESTION = (
+    "将关闭程序并安装 {version}，完成后自动重新启动。\n"
+    "仍有连接/监听时会先断开。\n\n现在安装吗？"
+)
+UPDATE_INSTALL_CONFIRM_TITLE = "安装更新"
 
 DEPENDENCY_TEXT = (
     "依赖与许可：PyQt6 与 PyQt6-Fluent-Widgets（GPL-3.0）、"
@@ -95,6 +111,12 @@ class SettingsPage(QWidget):
         self.extra_options = dict(kwargs)
         self._loading = True
         self.accent_hex = DEFAULT_ACCENT
+        # 更新状态：最后一次检查到的 Release、两个后台线程与下载环境。
+        self._release = None
+        self._check_worker = None
+        self._download_worker = None
+        self._work_dir: Path | None = None
+        self._manual_install = False
 
         self._build_ui()
         self.refresh_fields()
@@ -122,6 +144,7 @@ class SettingsPage(QWidget):
         root.addWidget(self._build_appearance_card(content))
         root.addWidget(self._build_behaviour_card(content))
         root.addWidget(self._build_paths_card(content))
+        root.addWidget(self._build_update_card(content))
         root.addWidget(self._build_about_card(content))
         root.addStretch(1)
 
@@ -259,10 +282,68 @@ class SettingsPage(QWidget):
         layout.addLayout(buttons)
         return card
 
+    def _build_update_card(self, parent: QWidget) -> QWidget:
+        card, layout = section_card("更新", UPDATE_HINT)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(1, 1)
+
+        version_row = QHBoxLayout()
+        version_row.setSpacing(8)
+        version_row.addWidget(BodyLabel("当前版本", card))
+        self.current_version_label = BodyLabel(APP_VERSION, card)
+        self.current_version_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        version_row.addWidget(self.current_version_label)
+        version_row.addStretch(1)
+        self.check_update_button = PushButton("检查更新", card)
+        self.check_update_button.setToolTip("立即向 GitHub Releases 查询最新正式版本")
+        self.check_update_button.clicked.connect(self.check_updates)
+        version_row.addWidget(self.check_update_button)
+        grid.addLayout(version_row, 0, 0, 1, 2)
+
+        grid.addWidget(BodyLabel("启动时检查", card), 1, 0)
+        self.auto_check_switch = SwitchButton(card)
+        self.auto_check_switch.setText("发现新版本时提示")
+        self.auto_check_switch.setToolTip("启动后在后台静默检查一次；关闭后不再发起任何更新请求")
+        self.auto_check_switch.checkedChanged.connect(self._on_auto_check_changed)
+        grid.addWidget(self.auto_check_switch, 1, 1)
+
+        self.update_status_label = CaptionLabel(UPDATE_IDLE_TEXT, card)
+        self.update_status_label.setWordWrap(True)
+        grid.addWidget(self.update_status_label, 2, 0, 1, 2)
+
+        self.update_notes_edit = QPlainTextEdit(card)
+        self.update_notes_edit.setReadOnly(True)
+        self.update_notes_edit.setFixedHeight(UPDATE_NOTES_HEIGHT)
+        self.update_notes_edit.setPlaceholderText("更新说明")
+        self.update_notes_edit.hide()
+        grid.addWidget(self.update_notes_edit, 3, 0, 1, 2)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        self.update_progress = ProgressBar(card)
+        self.update_progress.setValue(0)
+        self.update_progress.hide()
+        action_row.addWidget(self.update_progress, 1)
+        self.install_update_button = PrimaryPushButton("下载并安装", card)
+        self.install_update_button.setToolTip(
+            "下载后校验 SHA-256，确认后关闭程序并自动替换、重新启动"
+        )
+        self.install_update_button.clicked.connect(self._on_install_clicked)
+        self.install_update_button.hide()
+        action_row.addWidget(self.install_update_button)
+        grid.addLayout(action_row, 4, 0, 1, 2)
+
+        layout.addLayout(grid)
+        return card
+
     def _build_about_card(self, parent: QWidget) -> QWidget:
         card, layout = section_card(
             "关于",
-            "独立复刻声明、支持范围与依赖许可；不提供自动更新或外部下载。",
+            "独立复刻声明、支持范围与依赖许可；更新只从 GitHub Releases 下载并校验 SHA-256。",
         )
         self.version_label = BodyLabel(f"PortHelper Fluent {APP_VERSION}", card)
         self.version_label.setTextInteractionFlags(
@@ -341,6 +422,10 @@ class SettingsPage(QWidget):
             self._set_checked(
                 self.confirm_exit_switch,
                 _as_bool(self._value("ui.confirm_exit", True), True),
+            )
+            self._set_checked(
+                self.auto_check_switch,
+                _as_bool(self._value("ui.check_updates_on_start", True), True),
             )
             self._refresh_paths()
             self.status_label.setText("修改后自动保存。")
@@ -488,6 +573,12 @@ class SettingsPage(QWidget):
             return
         self._save_setting("ui.log_font_size", int(value))
 
+    @safe_slot
+    def _on_auto_check_changed(self, checked: bool) -> None:
+        if self._loading:
+            return
+        self._save_setting("ui.check_updates_on_start", bool(checked))
+
     # ---- 数据目录 -----------------------------------------------------
 
     @safe_slot
@@ -582,13 +673,185 @@ class SettingsPage(QWidget):
         self.status_label.setText("已恢复默认设置")
         show_success(self, "已恢复默认设置", "所有选项已回到默认值。")
 
+    # ---- 更新 ---------------------------------------------------------
+
+    @safe_slot
+    def check_updates(self, *_args) -> None:
+        """手动检查最新 Release；所有网络都在后台线程里完成。"""
+        if _worker_running(self._check_worker):
+            return
+        self.check_update_button.setEnabled(False)
+        self.update_status_label.setText("正在检查…")
+        worker = UpdateCheckWorker(parent=self)
+        worker.checked.connect(self._on_update_checked)
+        worker.failed.connect(self._on_update_failed)
+        worker.finished.connect(self._on_check_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._check_worker = worker
+        worker.start()
+
+    @safe_slot
+    def _on_check_finished(self, *_args) -> None:
+        self.check_update_button.setEnabled(True)
+
+    @safe_slot
+    def _on_update_checked(self, release, manual: bool = True) -> None:
+        """展示检查结果：有更新时给出说明与安装按钮，否则显示已是最新。"""
+        version = str(getattr(release, "version", "") or "").strip()
+        if version and is_newer(version):
+            self._release = release
+            get_logger().info(
+                "检查更新：发现新版本 %s（%s）", version, "手动" if manual else "启动"
+            )
+            self.update_status_label.setText(
+                f"发现新版本 {version}（{_release_size(release)}，{_release_date(release)}）"
+            )
+            notes = str(getattr(release, "notes", "") or "").strip()
+            self.update_notes_edit.setPlainText(notes[:UPDATE_NOTES_MAX_CHARS])
+            self.update_notes_edit.show()
+            self.install_update_button.setEnabled(True)
+            self.install_update_button.show()
+            return
+        self._release = None
+        self.update_notes_edit.hide()
+        self.install_update_button.hide()
+        self.update_progress.setValue(0)
+        self.update_progress.hide()
+        self.update_status_label.setText(f"已是最新版本（{APP_VERSION}）。")
+
+    @safe_slot
+    def _on_update_failed(self, message, manual: bool = True) -> None:
+        text = str(message or "").strip() or "未知错误"
+        self.update_status_label.setText(f"无法检查更新：{text}")
+        if manual:
+            show_warning(self, "检查更新失败", text)
+        else:
+            get_logger().warning("启动检查更新失败：%s", text)
+
+    @safe_slot
+    def _on_install_clicked(self, *_args) -> None:
+        """下载前先确认能保存、能替换，避免留下无法安装的下载文件。"""
+        release = self._release
+        if release is None:
+            show_warning(self, "没有可安装的更新", "请先点击“检查更新”。")
+            return
+        if self.paths is None:
+            show_error(self, "无法自动安装", "未提供数据目录，无法保存更新文件。")
+            return
+        frozen = bool(getattr(sys, "frozen", False))
+        target = Path(sys.executable)
+        if frozen and not can_replace(target):
+            show_error(
+                self,
+                "无法自动安装",
+                f"程序目录不可写：{target.parent}。"
+                f"请把程序移到有写入权限的目录，或手动替换 {target.name}。",
+            )
+            return
+        try:
+            work_dir = updates_dir(self.paths)
+            prune_updates(work_dir)
+        except OSError as exc:
+            get_logger().exception("准备更新目录失败")
+            show_error(self, "无法自动安装", f"更新目录不可用：{exc}")
+            return
+        self._work_dir = work_dir
+        self._manual_install = not frozen
+        self.update_progress.setValue(0)
+        self.update_progress.show()
+        self.install_update_button.setEnabled(False)
+        self.update_status_label.setText("正在下载更新…")
+        worker = UpdateDownloadWorker(release, work_dir, parent=self)
+        worker.progress.connect(self._on_download_progress)
+        worker.downloaded.connect(self._on_downloaded)
+        worker.failed.connect(self._on_download_failed)
+        worker.finished.connect(worker.deleteLater)
+        self._download_worker = worker
+        worker.start()
+
+    @safe_slot
+    def _on_download_progress(self, received: int, total: int) -> None:
+        received = max(0, int(received))
+        total = max(0, int(total))
+        if total > 0:
+            percent = max(0, min(100, int(received * 100 / total)))
+            self.update_progress.setValue(percent)
+            self.update_status_label.setText(f"正在下载更新：{percent}%")
+            return
+        self.update_status_label.setText(
+            f"正在下载更新：已下载 {_format_size(received)}"
+        )
+
+    @safe_slot
+    def _on_download_failed(self, message) -> None:
+        text = str(message or "").strip() or "未知错误"
+        self.update_progress.setValue(0)
+        self.update_progress.hide()
+        self.install_update_button.setEnabled(True)
+        self.update_status_label.setText(f"下载更新失败：{text}")
+        show_error(self, "下载更新失败", text)
+
+    @safe_slot
+    def _on_downloaded(self, path) -> None:
+        """下载校验通过：源码运行只提示手动替换，打包运行确认后安装并重启。"""
+        self.update_progress.setValue(0)
+        self.update_progress.hide()
+        downloaded = Path(path)
+        self.install_update_button.setEnabled(True)
+        if self._manual_install:
+            self.update_status_label.setText(f"更新包已下载：{downloaded}")
+            show_warning(self, "源码运行模式", "已下载后请手动替换打包后的 exe。")
+            self._open_directory(downloaded.parent, "更新目录")
+            return
+        version = str(getattr(self._release, "version", "") or "")
+        answer = QMessageBox.question(
+            self,
+            UPDATE_INSTALL_CONFIRM_TITLE,
+            UPDATE_INSTALL_QUESTION.format(version=version),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.update_status_label.setText(f"更新已下载，稍后可重新安装：{downloaded}")
+            return
+        self._install_and_restart(downloaded)
+
+    def _install_and_restart(self, downloaded: Path) -> None:
+        """启动替换脚本并让主窗口跳过退出确认关闭；失败只提示不改窗口状态。"""
+        try:
+            work_dir = self._work_dir or updates_dir(self.paths)
+            install_update(downloaded, Path(sys.executable), work_dir)
+        except Exception as exc:
+            get_logger().exception("启动更新安装失败")
+            show_error(self, "安装更新失败", readable_message(exc))
+            return
+        prepare = getattr(self.window(), "prepare_for_update", None)
+        if not callable(prepare):
+            show_error(
+                self,
+                "安装更新失败",
+                "无法关闭主窗口以完成替换，请手动退出程序后运行更新脚本。",
+            )
+            return
+        prepare()
+
     # ---- 生命周期 -----------------------------------------------------
 
     def has_active_work(self) -> bool:
         return False
 
     def stop_workers(self) -> None:
-        """设置页没有后台任务；保留接口供主窗口统一调用。"""
+        """中断并等待更新检查/下载线程，供主窗口关闭时统一调用。"""
+        for worker in (self._check_worker, self._download_worker):
+            if worker is None:
+                continue
+            try:
+                worker.requestInterruption()
+                worker.wait(2000)
+            except Exception:
+                get_logger().exception("停止更新线程失败")
+        self._check_worker = None
+        self._download_worker = None
 
     # ---- 工具 ---------------------------------------------------------
 
@@ -628,3 +891,35 @@ def _clamp_int(value, minimum: int, maximum: int, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return max(minimum, min(maximum, number))
+
+
+def _worker_running(worker) -> bool:
+    """线程是否仍在运行；测试注入的假 worker 不一定实现 isRunning()。"""
+    is_running = getattr(worker, "isRunning", None)
+    if not callable(is_running):
+        return worker is not None
+    try:
+        return bool(is_running())
+    except Exception:
+        return False
+
+
+def _format_size(size: int) -> str:
+    if size <= 0:
+        return "大小未知"
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / 1024:.0f} KB"
+
+
+def _release_size(release) -> str:
+    exe = getattr(release, "exe", None)
+    try:
+        return _format_size(int(getattr(exe, "size", 0) or 0))
+    except (TypeError, ValueError):
+        return "大小未知"
+
+
+def _release_date(release) -> str:
+    text = str(getattr(release, "published_at", "") or "").strip()
+    return text[:10] if text else "日期未知"

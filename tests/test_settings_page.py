@@ -13,6 +13,7 @@ from qfluentwidgets import Theme, qconfig
 from app import APP_VERSION
 from app.core.settings import DEFAULT_SETTINGS, Settings
 from app.services.paths import AppPaths, resolve_paths
+from app.services.updates import RELEASE_PAGE_URL, ReleaseAsset, ReleaseInfo
 from app.ui.pages import settings_page as settings_page_module
 from app.ui.pages.settings_page import SettingsPage
 
@@ -240,7 +241,7 @@ def test_about_card_lists_unsupported_items_without_urls(page) -> None:
     assert "PortHelper V1.8.8" in about
     assert "温子祺" in about
     assert "独立 Python 复刻" in about
-    for item in ("蓝牙", "内核串口监视", "CH372", "在线更新", "Keil 配色替换"):
+    for item in ("蓝牙", "内核串口监视", "CH372", "Keil 配色替换"):
         assert item in about
     assert "REA" in about
     assert "GPL-3.0" in about
@@ -248,7 +249,95 @@ def test_about_card_lists_unsupported_items_without_urls(page) -> None:
     assert "http://" not in lowered
     assert "https://" not in lowered
     assert "www." not in lowered
-    assert "自动更新" in about
+    # 在线更新已实现，不再出现在“不支持的功能”里。
+    assert "在线更新" not in about
+    assert "不提供自动更新" not in about
+
+
+def test_update_card_controls_and_auto_check_persist(page) -> None:
+    widget, settings, paths = page
+
+    assert widget.current_version_label.text() == APP_VERSION
+    assert widget.check_update_button.isEnabled() is True
+    assert widget.update_status_label.text() == settings_page_module.UPDATE_IDLE_TEXT
+    assert widget.update_notes_edit.isHidden() is True
+    assert widget.update_notes_edit.isReadOnly() is True
+    assert widget.update_progress.isHidden() is True
+    assert widget.install_update_button.isHidden() is True
+    assert widget.auto_check_switch.isChecked() is True
+
+    widget.auto_check_switch.setChecked(False)
+
+    assert settings.get("ui.check_updates_on_start") is False
+    assert _saved(paths)["ui.check_updates_on_start"] is False
+
+    widget.refresh_fields()
+
+    assert widget.auto_check_switch.isChecked() is False
+
+
+def test_update_check_shows_newer_release_and_hides_when_current(page) -> None:
+    widget, _settings, _paths = page
+    notes = "更新说明" * (settings_page_module.UPDATE_NOTES_MAX_CHARS // 2)
+    release = ReleaseInfo(
+        version="99.0.0",
+        tag="v99.0.0",
+        title="PortHelper Fluent 99.0.0",
+        notes=notes,
+        page_url=RELEASE_PAGE_URL,
+        published_at="2026-10-28T08:00:00Z",
+        exe=ReleaseAsset(
+            name="PortHelperFluent.exe",
+            url="https://github.com/Yaopyr/PortHelperFluent/releases/download/v99.0.0/exe",
+            size=12 * 1024 * 1024,
+            digest="",
+        ),
+        checksum=None,
+    )
+
+    widget._on_update_checked(release)
+
+    status = widget.update_status_label.text()
+    assert "99.0.0" in status
+    assert "12.0 MB" in status
+    assert "2026-10-28" in status
+    assert widget.update_notes_edit.isHidden() is False
+    assert widget.update_notes_edit.toPlainText() == notes[: settings_page_module.UPDATE_NOTES_MAX_CHARS]
+    assert widget.install_update_button.isHidden() is False
+    assert widget.install_update_button.isEnabled() is True
+    assert widget._release is release
+
+    widget._on_update_checked(
+        ReleaseInfo(
+            version=APP_VERSION,
+            tag=f"v{APP_VERSION}",
+            title="当前版本",
+            notes="",
+            page_url=RELEASE_PAGE_URL,
+            published_at="2026-10-28T08:00:00Z",
+            exe=None,
+            checksum=None,
+        )
+    )
+
+    assert widget.update_status_label.text() == f"已是最新版本（{APP_VERSION}）。"
+    assert widget.update_notes_edit.isHidden() is True
+    assert widget.install_update_button.isHidden() is True
+    assert widget._release is None
+
+
+def test_update_check_failure_reports_message(page) -> None:
+    widget, _settings, _paths = page
+    message = "无法连接 GitHub，请检查网络或代理设置。"
+
+    widget._on_update_failed(message)
+
+    assert widget.update_status_label.text() == f"无法检查更新：{message}"
+
+    # 启动静默检查失败时只改状态文字，不弹提示。
+    widget._on_update_failed("限流", manual=False)
+
+    assert widget.update_status_label.text() == "无法检查更新：限流"
 
 
 def test_settings_page_without_settings_or_paths_does_not_crash(qapp) -> None:

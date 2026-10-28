@@ -19,6 +19,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ui.window_geometry": "",
     "ui.max_display_lines": 20000,
     "ui.auto_scroll": True,
+    # 启动静默检查 GitHub Releases 的开关；关闭后启动时不再发起任何更新请求。
+    "ui.check_updates_on_start": True,
     "ui.confirm_exit": True,
     # 设置页的“默认编码/日志字体大小”在下次打开相关页面时生效。
     "ui.default_encoding": "utf-8",

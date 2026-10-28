@@ -36,6 +36,8 @@ APP_TITLE = "PortHelper Fluent"
 BINDING_FAILURE_HINT = "qfluentwidgets 当前不是 PyQt6 版本"
 # 置为 1 时只写日志、不弹任何模态框，供无界面测试/子进程使用。
 NO_DIALOGS_ENV = "PORTHELPER_NO_DIALOGS"
+# 置为 1 时启动不发起静默更新检查（离线环境/自动化用）。
+NO_UPDATE_CHECK_ENV = "PORTHELPER_NO_UPDATE_CHECK"
 REQUIRED_MODULES = (
     "PyQt6",
     "qfluentwidgets",
@@ -347,6 +349,11 @@ def _start_gui(
     # 模态提示会阻塞 --smoke-test 的自动退出，冒烟模式只写日志。
     if portable_warning and _dialogs_enabled() and not smoke_test:
         _show_warning_dialog(portable_warning)
+    # 启动静默检查更新：冒烟、无界面与显式禁用时都不联网。
+    if not smoke_test and _dialogs_enabled() and not _update_check_disabled():
+        schedule = getattr(window, "schedule_update_check", None)
+        if callable(schedule):
+            schedule()
     logger.info("%s %s 已启动，数据目录：%s", APP_TITLE, APP_VERSION, paths.data_dir)
 
     if smoke_test:
@@ -402,6 +409,12 @@ def _dialogs_enabled() -> bool:
     """`PORTHELPER_NO_DIALOGS=1` 时禁用所有启动期模态框，只写日志。"""
     value = os.environ.get(NO_DIALOGS_ENV, "").strip().lower()
     return value not in ("1", "true", "yes", "on")
+
+
+def _update_check_disabled() -> bool:
+    """`PORTHELPER_NO_UPDATE_CHECK=1` 时启动不发起静默更新检查。"""
+    value = os.environ.get(NO_UPDATE_CHECK_ENV, "").strip().lower()
+    return value in ("1", "true", "yes", "on")
 
 
 def _show_error_dialog(message: str) -> None:

@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
+from PyQt6.QtCore import QByteArray, QPointF, QRectF, QTimer, Qt
 from PyQt6.QtGui import (
     QColor,
     QIcon,
@@ -22,7 +22,10 @@ from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
 from app import APP_VERSION
 from app.core.logging_setup import get_logger
 from app.core.settings import Settings
+from app.io.update_worker import UpdateCheckWorker
 from app.services.paths import AppPaths
+from app.services.updates import is_newer
+from app.ui.feedback import show_info
 from app.ui.pages.c51_page import C51Page
 from app.ui.pages.checksum_page import ChecksumPage
 from app.ui.pages.convert import ConvertPage
@@ -38,6 +41,9 @@ from app.ui.theme import apply_theme, enable_mica as enable_window_mica
 APP_TITLE = "PortHelper Fluent"
 # 与 main.NO_DIALOGS_ENV 同一语义：无界面/自动测试环境不弹任何模态框。
 NO_DIALOGS_ENV = "PORTHELPER_NO_DIALOGS"
+
+# 启动静默检查更新的延迟：让窗口先完成首次绘制，避免与启动耗时叠加。
+STARTUP_UPDATE_CHECK_DELAY_MS = 1500
 
 # 导航面板始终以悬浮（MENU）模式展开：qfluentwidgets 在窗口足够宽时会把
 # 面板撑进布局、挤压页面内容；把“允许内嵌展开”的门槛抬到不可达即可让
@@ -227,6 +233,9 @@ class MainWindow(FluentWindow):
         self._settings = settings
         self._paths = paths
         self._smoke_mode = False
+        # 更新安装后重启时跳过退出确认；启动检查线程由 stop_workers() 统一收尾。
+        self._skip_exit_confirm = False
+        self._startup_update_worker = None
         self.pages: dict[str, QWidget] = {}
 
         self.setObjectName("mainWindow")
@@ -324,6 +333,47 @@ class MainWindow(FluentWindow):
                 page.stop_workers()
             except Exception:
                 get_logger().exception("停止页面后台任务失败：%s", page.objectName())
+        worker = self._startup_update_worker
+        if worker is not None:
+            try:
+                worker.requestInterruption()
+                worker.wait(2000)
+            except Exception:
+                get_logger().exception("停止启动更新检查线程失败")
+            self._startup_update_worker = None
+
+    # ---- 在线更新 -----------------------------------------------------
+
+    def schedule_update_check(self) -> None:
+        """按设置安排一次启动静默检查；不满足条件时什么都不做。"""
+        if not bool(self._settings.get("ui.check_updates_on_start", True)):
+            return
+        QTimer.singleShot(STARTUP_UPDATE_CHECK_DELAY_MS, self._silent_update_check)
+
+    def _silent_update_check(self) -> None:
+        """在后台检查最新版本；失败只写日志，绝不打断启动。"""
+        if self._startup_update_worker is not None:
+            return
+        worker = UpdateCheckWorker(parent=self)
+        worker.checked.connect(self._on_startup_update_checked)
+        worker.failed.connect(lambda msg: get_logger().warning("检查更新失败：%s", msg))
+        worker.finished.connect(worker.deleteLater)
+        self._startup_update_worker = worker
+        worker.start()
+
+    def _on_startup_update_checked(self, release) -> None:
+        try:
+            version = str(getattr(release, "version", "") or "")
+            if version and is_newer(version):
+                show_info(self, f"发现新版本 {version}", "可在「设置 → 更新」中查看并安装。")
+        except Exception:
+            get_logger().exception("处理启动更新检查结果失败")
+
+    def prepare_for_update(self) -> None:
+        """更新安装前跳过退出确认，保存几何并关闭窗口（仍会停止后台任务）。"""
+        self._skip_exit_confirm = True
+        self._save_geometry()
+        self.close()
 
     def closeEvent(self, event) -> None:
         """退出前确认并停止后台任务；确认失败也必须清理，取消则保持窗口打开。"""
@@ -345,7 +395,9 @@ class MainWindow(FluentWindow):
         super().closeEvent(event)
 
     def _confirm_close(self) -> bool:
-        """返回是否允许关闭；冒烟模式/无对话框环境直接允许。"""
+        """返回是否允许关闭；更新安装/冒烟模式/无对话框环境直接允许。"""
+        if self._skip_exit_confirm:
+            return True
         if self._smoke_mode:
             return True
         if not self.has_active_work():

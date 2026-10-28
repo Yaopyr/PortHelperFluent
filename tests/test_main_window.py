@@ -10,8 +10,10 @@ from PyQt6.QtCore import QByteArray
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
+from app import APP_VERSION
 from app.core.settings import Settings
 from app.services.paths import AppPaths, resolve_paths
+from app.services.updates import RELEASE_PAGE_URL, ReleaseAsset, ReleaseInfo
 from app.ui import main_window as main_window_module
 from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow, _PAGE_SPECS, icon_for
 
@@ -415,3 +417,115 @@ def test_fallback_icon_used_when_ico_is_missing(qapp, monkeypatch) -> None:
 
     assert not icon.isNull()
     assert icon.availableSizes()
+
+
+def _release(version: str) -> ReleaseInfo:
+    return ReleaseInfo(
+        version=version,
+        tag=f"v{version}",
+        title=f"PortHelper Fluent {version}",
+        notes="",
+        page_url=RELEASE_PAGE_URL,
+        published_at="2026-10-28T08:00:00Z",
+        exe=ReleaseAsset(
+            name="PortHelperFluent.exe",
+            url="https://github.com/Yaopyr/PortHelperFluent/releases/download/exe",
+            size=1024,
+            digest="",
+        ),
+        checksum=None,
+    )
+
+
+def test_prepare_for_update_skips_confirmation_and_stops_workers(
+    window, qapp, monkeypatch
+) -> None:
+    main_window, settings, _paths = window
+    settings.set("ui.confirm_exit", True)
+    main_window.show()
+    qapp.processEvents()
+    monkeypatch.setattr(main_window.pages["serial"], "has_active_work", lambda: True)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: pytest.fail("更新重启不应弹退出确认")
+    )
+    stopped: list[bool] = []
+    monkeypatch.setattr(main_window, "stop_workers", lambda: stopped.append(True))
+
+    main_window.prepare_for_update()
+
+    assert main_window._skip_exit_confirm is True
+    assert main_window.isVisible() is False
+    assert stopped == [True]
+
+
+def test_startup_update_check_respects_setting(window, monkeypatch) -> None:
+    main_window, settings, _paths = window
+    created: list[object] = []
+    started: list[bool] = []
+    scheduled: list[tuple[int, object]] = []
+    infos: list[tuple[str, str]] = []
+
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.slots = []
+
+        def connect(self, slot) -> None:
+            self.slots.append(slot)
+
+    class FakeUpdateCheckWorker:
+        def __init__(self, parent=None) -> None:
+            self.parent_widget = parent
+            self.checked = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            created.append(self)
+
+        def start(self) -> None:
+            started.append(True)
+
+        def deleteLater(self) -> None:
+            pass
+
+        def requestInterruption(self) -> None:
+            pass
+
+        def wait(self, *_args) -> bool:
+            return True
+
+    monkeypatch.setattr(main_window_module, "UpdateCheckWorker", FakeUpdateCheckWorker)
+    monkeypatch.setattr(
+        main_window_module.QTimer,
+        "singleShot",
+        staticmethod(lambda ms, fn: scheduled.append((ms, fn))),
+    )
+    monkeypatch.setattr(
+        main_window_module,
+        "show_info",
+        lambda parent, title, content="": infos.append((title, content)),
+    )
+
+    settings.set("ui.check_updates_on_start", False)
+    main_window.schedule_update_check()
+
+    assert scheduled == []
+    assert created == []
+
+    settings.set("ui.check_updates_on_start", True)
+    main_window.schedule_update_check()
+
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == main_window_module.STARTUP_UPDATE_CHECK_DELAY_MS
+
+    scheduled[0][1]()
+    assert len(created) == 1
+    assert started == [True]
+    assert created[0].parent_widget is main_window
+    # 已有检查线程时重复触发不会起第二个线程。
+    main_window._silent_update_check()
+    assert len(created) == 1
+
+    main_window._on_startup_update_checked(_release("99.0.0"))
+    assert infos == [("发现新版本 99.0.0", "可在「设置 → 更新」中查看并安装。")]
+
+    main_window._on_startup_update_checked(_release(APP_VERSION))
+    assert len(infos) == 1
