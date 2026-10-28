@@ -6,7 +6,7 @@
   ![Platform](https://img.shields.io/badge/platform-Windows%2011-0A84FF)
   ![Python](https://img.shields.io/badge/python-3.13-3776AB)
   ![PyQt6](https://img.shields.io/badge/PyQt6-6.11-41CD52)
-  ![Tests](https://img.shields.io/badge/tests-623%20passed-0F7B0F)
+  ![Tests](https://img.shields.io/badge/tests-682%20passed-0F7B0F)
   ![License](https://img.shields.io/badge/license-MIT-blue)
 </div>
 
@@ -40,7 +40,7 @@
 | 图片取模 | 图片→C/BIN/LVGL8/LVGL9、水平/垂直扫描、四种方向、1/8/16/24/32 位、大小端、缩放、1 位阈值、批量导出 |
 | 点阵生成 | 文字/BMP 取模、系统字体、粗体/斜体、扫描/走向/位序、分页、单元格编辑、C/BIN 导出、BMP 文件夹批量 |
 | C51 向导 | 晶振/6T/12T、P0–P3、外部中断/定时器/串口中断、定时器 0–2、波特率、SMOD、功耗模式、软件延时、警告、C 与 Keil 工程导出 |
-| 设置与关于 | 主题/强调色、默认编码、日志显示、路径、配置导出/重置、支持范围与致谢 |
+| 设置与关于 | 主题/强调色、默认编码、日志显示、路径、配置导出/重置、在线更新、支持范围与致谢 |
 
 ## 界面与交互
 
@@ -112,6 +112,17 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 
 产物：`dist\PortHelperFluent.exe`。构建细节见 [构建指南](docs/BUILDING.md)。
 
+## 在线更新
+
+程序内置更新器，只从本项目的 GitHub Releases 获取新版本：
+
+- **来源**：`https://github.com/Yaopyr/PortHelperFluent/releases/latest`（只认正式 Release，draft/prerelease 不参与）。
+- **校验**：只允许 https 且主机在 GitHub 白名单内（重定向后的最终地址再校验一次）；下载优先用 Release 元数据的 `sha256:` digest，缺失时下载 `SHA256.txt`，哈希不符立即删除文件并中止。
+- **文件位置**：下载包、`.part` 临时文件、旧版本备份、`apply-update.ps1` 与 `update.log` 都在 `%APPDATA%\PortHelperFluent\updates`——**exe 放在桌面时不会在桌面新增任何文件**。便携模式（`portable.flag`）下落在 `data\updates`。
+- **安装**：确认后程序关闭（跳过退出确认，仍停止串口/网络/HID 等后台任务），由 PowerShell 脚本等待进程退出、替换 exe 并自动重启；失败写 `update.log` 并用备份回滚。
+- **触发**：启动 1.5 秒后静默检查一次，发现新版本时右上角提示；「设置 → 更新」可手动检查、「下载并安装」，也可用「启动时检查」开关关闭启动检查（关闭后不再发起任何更新请求）。
+- **源码运行**：`python main.py` 只检查与下载，不替换文件，按提示手动替换打包后的 exe；程序目录不可写（如 `Program Files`）时同样只提示已下载路径。
+
 ## 项目结构
 
 ```text
@@ -124,7 +135,7 @@ porthelper-fluent/
 ├─ analysis/       # 逆向文字证据与解析脚本（原始二进制/图片资源不提交）
 ├─ build/          # PyInstaller spec、构建脚本、图标、版本信息
 ├─ docs/           # 架构、构建、使用、逆向说明、设计规格与实施计划
-├─ tests/          # pytest 测试（623 项）
+├─ tests/          # pytest 测试（682 项）
 ├─ main.py         # 应用入口与自检
 ├─ requirements.txt
 └─ pytest.ini
@@ -166,7 +177,7 @@ python -m pytest
 
 当前仓库状态：
 
-- **623 项测试通过**（pytest，离屏 Qt，无真实串口/HID 依赖）。
+- **682 项测试通过**（pytest，离屏 Qt，无真实串口/HID 依赖）。
 - 覆盖校验已知向量、CRC 独立参考、8051 定时/波特率寄存器、RGB565/RGB332、扫描方向/字节序、字模位序/分页、配置损坏恢复、便携目录回退、TCP/UDP 回环、串口/HID 假传输、打包 selftest/smoke。
 - 打包后的 exe 在隔离 `APPDATA`、空 `PYTHONUSERBASE`/`PYTHONPATH` 的临时目录中通过 `--selftest` 与 `--smoke-test`。
 - 真实串口/HID 设备读写、Keil 打开生成的工程属于手工验收项。
@@ -197,7 +208,6 @@ python -m pytest
 | 蓝牙调试 | 原程序调用独立蓝牙助手 exe，依赖外部驱动与配对流程 |
 | 串口高级监视 | 依赖 32 位内核驱动，安装/卸载具有系统侵入性 |
 | CH372 / CH375 | 需要厂商 DLL，纯 Python 单文件无法可靠复刻 |
-| 在线自动更新 | 原下载/更新链路不属于本项目交付 |
 | Keil 配色一键替换 | 会修改外部 Keil 配置，改为不做 |
 
 HID 页面仅支持标准 HID；串口“会话记录”是本程序自己的收发记录，不是系统级端口监视。
@@ -209,7 +219,7 @@ HID 页面仅支持标准 HID；串口“会话记录”是本程序自己的收
 - **UDP 域名发送**：域名解析是异步的，发送请求会排队；解析失败时不会在 TX 日志留下假记录。
 - **页面规模**：部分页面 900–1200 行，功能完整但后续可拆分为更小的控制器/视图。
 - **设置生效时机**：主题、退出确认立即生效；显示行数、日志字号等显示类设置在下次启动应用时生效。
-- **未提供自动更新**：请从源码构建或自行分发构建产物。
+- **在线更新范围**：只从 GitHub 正式 Release 更新，不支持增量更新与代码签名；目标目录不可写时不会自动替换（详见上文「在线更新」）。
 
 ## 配置与日志
 

@@ -58,7 +58,7 @@ python -m pytest
 - 本地 TCP/UDP 回环、TCP 服务端多客户端、UDP 域名队列；
 - 串口/HID 假传输、页面离屏实例化、真实按钮点击。
 
-当前基线：**623 passed**。硬件 I/O、Keil 打开工程属于手工验收。
+当前基线：**682 passed**。硬件 I/O、Keil 打开工程属于手工验收。
 
 单独跑某类测试：
 
@@ -103,6 +103,42 @@ python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work 
 
 `build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial，以及图标/版本信息。不要额外关闭这些依赖，否则运行时会缺模块。
 
+## 发布 Release
+
+内置更新器只读 `https://api.github.com/repos/Yaopyr/PortHelperFluent/releases/latest`，并按固定资产名下载，因此发布顺序不能省略任何一步。
+
+1. **版本一致性**：`app/__init__.py` 的 `APP_VERSION` 与 `build/version_info.txt` 的 `filevers`/`prodvers`/`FileVersion`/`ProductVersion` 必须是同一个版本（本项目为 `1.0.1`）；`CHANGELOG.md` 与 `README.md` 的测试计数同步更新。`version_info.txt` 是手工维护的独立副本，不会从 `APP_VERSION` 自动生成。
+2. **构建**：`powershell -ExecutionPolicy Bypass -File build/build.ps1`，确认全量测试通过、隔离目录 `--selftest`/`--smoke-test` 退出码为 0、`dist/SHA256.txt` 与 `dist/build.log` 记录的版本为 `1.0.1`。
+3. **打标签**：
+   ```powershell
+   git tag -a v1.0.1 -m "PortHelper Fluent 1.0.1"
+   ```
+4. **推送**：
+   ```powershell
+   git push origin main
+   git push origin v1.0.1
+   ```
+5. **创建 Release**（`notes.md` 内容取自 `CHANGELOG.md` 的 `[1.0.1]` 节）：
+   ```powershell
+   gh release create v1.0.1 dist/PortHelperFluent.exe dist/SHA256.txt `
+     --title "PortHelper Fluent 1.0.1" --notes-file notes.md
+   ```
+6. **校验**：
+   ```powershell
+   gh release view v1.0.1 --json tagName,isDraft,assets
+   ```
+   期望 `tagName` 为 `v1.0.1`、`isDraft` 为 `false`、资产正好两个。
+
+**资产名必须严格为 `PortHelperFluent.exe` 与 `SHA256.txt`**：更新器按这两个名字匹配（exe 大小写不敏感，找不到同名 exe 才回退第一个 `.exe`；校验优先用 Release 元数据的 `sha256:` digest，否则下载 `SHA256.txt`）。改名、少传 `SHA256.txt` 或把资产打包成 zip 都会让在线更新失效。
+
+发布后可用一条命令验证线上元数据：
+
+```powershell
+python -c "from app.services.updates import fetch_latest_release, is_newer; r=fetch_latest_release(); print(r.version, r.exe.name, r.exe.size, r.exe.digest); print('newer:', is_newer(r.version))"
+```
+
+回滚：`gh release delete v1.0.1 --yes`、`git push origin :refs/tags/v1.0.1`，再重新打标签发布。
+
 ## 打包后自检
 
 ```powershell
@@ -119,7 +155,7 @@ dist\PortHelperFluent.exe --smoke-test
   "python": "3.13.9",
   "qt": "6.11.0",
   "qfluentwidgets": "1.11.2",
-  "version": "1.0.0"
+  "version": "1.0.1"
 }
 ```
 

@@ -10,7 +10,7 @@
 4. **单文件交付**：PyInstaller onefile，不安装服务/驱动，不写注册表，不需要管理员权限。
 5. **失败可读**：所有用户可见错误使用中文「发生了什么 + 可能原因 + 下一步」，技术细节写日志。
 
-非目标：系统级串口驱动监视、厂商 DLL（CH372）、蓝牙助手、自动更新。
+非目标：系统级串口驱动监视、厂商 DLL（CH372）、蓝牙助手、增量/签名更新。
 
 ## 分层
 
@@ -66,6 +66,7 @@ flowchart TB
 | `hid_worker.py` | `HidBackend` 协议、hidapi 适配、`HidWorker(QThread)`、设备枚举 |
 | `net_client.py` | `NetClientController(QObject)`，TCP/UDP、异步域名、状态/错误信号 |
 | `net_server.py` | `NetServerController(QObject)`，监听、多客户端、广播、计数 |
+| `update_worker.py` | daemon 线程 + QObject 信号的检查/下载任务（不阻塞界面、退出不阻塞进程） |
 
 ### services
 
@@ -75,6 +76,8 @@ flowchart TB
 | `exports.py` | 文件名清洗、唯一路径、原子写 |
 | `session_log.py` | 记录、字节/条数上限、生命周期计数、TXT/CSV 导出 |
 | `net_tools.py` | 系统 `ping.exe`、DNS、psutil 网卡信息、默认网关 |
+| `updates.py` | GitHub Release 查询、版本比较、资产选择、https+白名单下载、SHA-256 校验 |
+| `updater_install.py` | 目标目录可写检测、备份、ASCII PowerShell 自替换脚本与重启 |
 
 ### ui
 
@@ -145,6 +148,27 @@ IO 信号 → LogPane.append_bytes()
 - 超过会话上限时丢弃最旧记录；`LogPane` 显示「会话记录已截断」，TXT 导出带说明行。
 - 显示区有上限，导出使用 `SessionLog` 的完整保留内容；CSV 使用 UTF-8 BOM。
 
+### 更新
+
+```text
+启动（1.5 s 延时）或设置页「检查更新」
+        → UpdateCheckWorker（daemon 线程，urllib + 10 s 超时）
+        → ReleaseInfo（tag/版本/说明/资产）
+        → 用户点「下载并安装」→ UpdateDownloadWorker（进度/取消）
+        → 写入 data\updates\PortHelperFluent-<version>.exe.part → os.replace
+        → SHA-256 校验（digest 或 SHA256.txt）→ 用户确认
+        → MainWindow.prepare_for_update()：跳过退出确认，仍 stop_workers()，关闭窗口
+        → PowerShell 脚本（DETACHED_PROCESS）：[System.IO.File]::Replace 原子替换
+          exe → 写 update.log → Start-Process 重启
+```
+
+- 检查分两种入口：启动静默检查由 `MainWindow.schedule_update_check()` 发起（受 `ui.check_updates_on_start`、smoke 与 `PORTHELPER_NO_UPDATE_CHECK` 约束，发现新版本只弹 InfoBar），手动检查由设置页「更新」卡片发起（失败弹警告）。单元测试不经过 `main._start_gui`，不会联网。
+- 下载只接受 https 与白名单主机（`github.com`/`*.githubusercontent.com`），重定向后的最终 URL 再校验一次；`requestInterruption()` 即取消，取消或异常都会删除 `.part`。
+- 安装脚本等进程退出后再替换：`[System.IO.File]::Replace` 要求源与目标同卷，跨卷失败时回退 `Copy-Item -Force`（同样只覆盖目标 exe，不在目标目录产生旁路文件）；替换失败用备份回滚并重启旧版，`update.log` 留证据。脚本正文纯 ASCII、以 UTF-8 BOM 落盘，避免 PowerShell 5.1 在非 ASCII 路径下乱码。
+- 更新相关文件（下载包、`.part`、备份、脚本、日志）都写在 `paths.data_dir/updates`：非便携模式即 `%APPDATA%\PortHelperFluent\updates`，exe 所在目录（例如桌面）零新增；便携模式按设计落 `data\updates`。
+- 不用 `QThread` 承载更新任务：`fetcher` 里是阻塞的 urllib 读取，`requestInterruption()` 无法打断它；`wait()` 超时后窗口析构时线程仍在运行，Qt 会报 `QThread: Destroyed while thread is still running` 并 abort（0xC0000409）。因此改用 daemon `threading.Thread` 执行 `run()`，结果通过 QObject 的 `pyqtSignal` 排队投递回界面线程，`wait(ms)` 只做有限等待，退出时不会卡住进程。
+- 源码运行（`sys.frozen` 为假）只检查与下载，不执行替换，避免误替换 `python.exe`；目标目录不可写时同样不启动脚本。
+
 ## 配置与路径
 
 | 项 | 默认 |
@@ -204,5 +228,6 @@ IO 信号 → LogPane.append_bytes()
 - 分栏比例、最近导出目录尚未全部记忆。
 - 日志方向仅用 `[RX]/[TX]` 前缀区分，未做逐行颜色。
 - 真实串口/HID/Keil 属手工验收，不在自动测试范围。
+- 更新仅支持 GitHub 正式 Release，无增量更新与代码签名。
 
 这些是维护性/性能债务，不影响当前功能正确性。

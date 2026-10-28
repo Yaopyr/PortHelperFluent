@@ -2,6 +2,33 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
+## [1.0.1] - 2026-10-28
+
+在线更新：从 GitHub Releases 检查并安装新版本，同时保留 1.0.0 的全部功能。
+
+### Added
+
+- 在线更新：启动时静默检查（1.5 秒延时）与设置页手动检查，查询 `https://api.github.com/repos/Yaopyr/PortHelperFluent/releases/latest`，只认正式 Release。
+- 发现新版本时显示更新说明（Release notes）、版本号与安装包大小；「下载并安装」在后台下载并显示进度/百分比，可取消。
+- 下载安全：仅允许 https 且主机在 GitHub 白名单内（重定向后的最终地址再校验一次），优先用 Release 元数据的 `sha256:` digest，否则下载 `SHA256.txt`；哈希不符立即删除文件并中止。
+- 安装方式：下载校验通过后确认一次，关闭程序（跳过退出确认、仍停止后台任务），由 ASCII PowerShell 脚本等待进程退出后原子替换 exe（跨卷回退 `Copy-Item`）并自动重启；失败写 `update.log` 并用备份回滚。
+- 更新文件（下载包、`.part`、备份、安装脚本、`update.log`）统一放在 `%APPDATA%\PortHelperFluent\updates`，exe 放在桌面时不会在桌面新增任何文件；便携模式落在 `data\updates`。
+- 设置页「更新」卡片：当前版本、启动时检查开关（`ui.check_updates_on_start`，关闭后不再发起任何更新请求）、状态与进度、下载并安装按钮。
+- 源码运行时不执行替换，只提示已下载路径；程序目录不可写时拒绝自动安装并给出提示。
+- 682 项 pytest 测试；更新模块与安装器全部用注入的假 opener/假 popen 覆盖，不产生真实网络请求。
+
+### Changed
+
+- 版本号升至 1.0.1（`app/__init__.py` 与 `build/version_info.txt` 同步）。
+- 「关于」卡片与文档已同步更新来源与校验方式（更新只从 GitHub Releases 下载并校验 SHA-256），不再把更新列在支持范围之外。
+
+### Known Limitations
+
+- 更新仅支持 Windows，且只认 GitHub 正式 Release（draft/prerelease 不参与）；仓库转私有后未带 token 的检查会失败。
+- 不做增量/差分更新与代码签名，仅依赖 https + SHA-256 + 主机白名单。
+- 便携模式下更新文件落在 `data\updates`（便携模式本就把数据放在 exe 旁）。
+- 目标目录不可写（如 `Program Files`）时不自动替换，只提示已下载路径。
+
 ## [1.0.0] - 2026-10-28
 
 首个公开版本：Windows 11 风格的单片机多功能调试助手，独立 Python 复刻。
@@ -21,7 +48,7 @@
 - C51 向导：晶振/6T/12T、端口、中断、定时器、串口/波特率、功耗/延时、警告、C 与 Keil 工程导出。
 - 设置与关于：主题、默认编码、显示行数、自动滚动、退出确认、日志字号、路径、配置导出/重置、支持范围与致谢。
 - 应用图标、单文件 PyInstaller 构建脚本、版本信息、`--selftest`/`--smoke-test`。
-- 623 项 pytest 测试；打包产物在隔离临时目录中通过自检与冒烟。
+- 覆盖核心算法、页面与 IO 的 pytest 全量测试；打包产物在隔离临时目录中通过自检与冒烟。
 
 ### Changed / Hardened
 
@@ -37,7 +64,7 @@
 
 - 图片/点阵批量转换与音频解码仍在 GUI 线程，超大文件可能短暂卡顿。
 - 真实串口/HID/Keil 工程需要手工验收。
-- 不包含蓝牙、系统级串口监视、CH372、在线自动更新、Keil 配色替换。
+- 不包含蓝牙、系统级串口监视、CH372、Keil 配色替换。
 - 部分页面 900–1200 行，后续可拆分。
 - 显示类设置（日志字号、最大行数等）在下次启动生效。
 
