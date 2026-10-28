@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import QMessageBox, QWidget
 from app.core.settings import Settings
 from app.services.paths import AppPaths, resolve_paths
 from app.ui import main_window as main_window_module
-from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow, _PAGE_SPECS
+from app.ui.main_window import APP_TITLE, PAGE_ROUTES, MainWindow, _PAGE_SPECS, icon_for
 
 
 @pytest.fixture
@@ -199,6 +199,7 @@ def test_navigation_expands_as_floating_panel(window, qapp) -> None:
     panel = main_window.navigationInterface.panel
     stacked_rect = main_window.stackedWidget.geometry()
     nav_width = main_window.navigationInterface.width()
+    assert stacked_rect.width() == main_window.width() - 48
 
     main_window.navigationInterface.expand(useAni=False)
     qapp.processEvents()
@@ -211,8 +212,12 @@ def test_navigation_expands_as_floating_panel(window, qapp) -> None:
 
 
 def test_navigation_icons_are_unique() -> None:
-    unique_icons = {spec[2] for _header, specs in _PAGE_SPECS for spec in specs}
-    assert len(unique_icons) == len(PAGE_ROUTES) == 10
+    from qfluentwidgets import FluentIcon
+
+    names = [spec[2] for _header, specs in _PAGE_SPECS for spec in specs]
+    # 名称拼错时 icon_for() 会静默退回 FluentIcon.APPLICATION，必须比对解析结果。
+    assert all(name in FluentIcon.__members__ for name in names)
+    assert len({icon_for(name) for name in names}) == len(PAGE_ROUTES) == 10
 
 
 def test_close_in_no_dialogs_mode_skips_question_and_stops_workers(
