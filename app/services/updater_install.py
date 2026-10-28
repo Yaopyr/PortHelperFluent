@@ -1,15 +1,15 @@
 """Windows 自替换安装：生成 PowerShell 脚本，退出后替换 exe 并重启。
 
 应用自身无法覆盖正在运行的 exe，因此先写一个脚本，再用 `DETACHED_PROCESS` 启动
-独立进程执行：等待旧进程退出 → 把新 exe 复制成 `<target>.new` 暂存文件 → 用
-`Move-Item -Force` 原子替换目标（同目录同卷）→ 写 `update.log` → 重启新版本；
-替换失败时清理暂存文件、用备份回滚并重启旧版。
+独立进程执行：等待旧进程退出 → 用 `[System.IO.File]::Replace` 原子替换目标 → 写
+`update.log` → 重启新版本；`File.Replace` 要求源与目标同卷，跨卷等失败时退回
+`Copy-Item -Force`（同样不在目标目录产生旁路文件）。替换失败时用备份还原目标并
+重启旧版。
 
 脚本正文只用 ASCII 英文（PowerShell 5.1 在无 BOM 时会按 ANSI 解码），并以带 BOM
 的 UTF-8 落盘，保证路径里出现中文用户名时也不会乱码；路径一律单引号包裹并把
 `'` 双写成 `''`。备份、脚本与日志都写在 `work_dir`（即 `data_dir/updates`），
-exe 目录里只会短暂出现 `<target>.new`（原子替换必须同目录暂存，成功即改名、
-失败即删除）。
+exe 所在目录（例如桌面）**不会新增任何文件**：替换直接落到目标 exe 上。
 """
 
 from __future__ import annotations
@@ -45,13 +45,14 @@ _POWERSHELL_ARGS = (
 )
 
 # 脚本正文：@NEW_EXE@ / @TARGET_EXE@ / @BACKUP_EXE@ / @LOG_PATH@ / @TARGET_PID@
-# 由 write_install_script 替换。注意 PowerShell 的 $PID 是只读自动变量，等待用的
-# 进程号直接内联，不定义同名变量。
+# 由 write_install_script 替换。注意两点：
+# 1) PowerShell 的 $PID 是只读自动变量，等待用的进程号直接内联，不定义同名变量；
+# 2) File.Replace 的第三个参数必须传 [NullString]::Value——PowerShell 会把 $null
+#    转成空字符串传给 .NET string 参数，File.Replace 会因此抛 "The path is empty"。
 _SCRIPT_TEMPLATE = """# PortHelper Fluent update script. Generated automatically, ASCII-only.
 $ErrorActionPreference = 'Continue'
 $newExe = '@NEW_EXE@'
 $targetExe = '@TARGET_EXE@'
-$stagingExe = '@TARGET_EXE@.new'
 $backupExe = '@BACKUP_EXE@'
 $logPath = '@LOG_PATH@'
 
@@ -69,10 +70,21 @@ try {
         Write-UpdateLog ('Wait-Process skipped: ' + $_.Exception.Message)
     }
     Start-Sleep -Milliseconds 900
-    Copy-Item -LiteralPath '@NEW_EXE@' -Destination '@TARGET_EXE@.new' -Force -ErrorAction Stop
-    Write-UpdateLog ('Staged the new exe as ' + $stagingExe)
-    Move-Item -LiteralPath '@TARGET_EXE@.new' -Destination '@TARGET_EXE@' -Force -ErrorAction Stop
-    Write-UpdateLog 'Move-Item replaced the target exe.'
+    try {
+        # Third argument is the backup path: PowerShell converts $null to an empty
+        # string for .NET string parameters, so [NullString]::Value is required.
+        [System.IO.File]::Replace('@NEW_EXE@', '@TARGET_EXE@', [NullString]::Value)
+        $replaced = $true
+        Write-UpdateLog 'File.Replace replaced the target exe.'
+    }
+    catch {
+        $replaced = $false
+        Write-UpdateLog ('File.Replace failed, falling back to Copy-Item: ' + $_.Exception.Message)
+    }
+    if (-not $replaced) {
+        Copy-Item -LiteralPath '@NEW_EXE@' -Destination '@TARGET_EXE@' -Force -ErrorAction Stop
+        Remove-Item -LiteralPath '@NEW_EXE@' -Force -ErrorAction SilentlyContinue
+    }
     Start-Process -FilePath '@TARGET_EXE@'
     Write-UpdateLog 'Restart requested.'
     Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue
@@ -80,12 +92,16 @@ try {
 }
 catch {
     Write-UpdateLog ('Update failed: ' + $_.Exception.Message)
-    Remove-Item -LiteralPath '@TARGET_EXE@.new' -Force -ErrorAction SilentlyContinue
-    try {
-        if (Test-Path -LiteralPath $backupExe) {
+    if (Test-Path -LiteralPath $backupExe) {
+        try {
             Copy-Item -LiteralPath $backupExe -Destination '@TARGET_EXE@' -Force -ErrorAction Stop
             Write-UpdateLog 'Restored the backup exe.'
         }
+        catch {
+            Write-UpdateLog ('Restore from backup failed: ' + $_.Exception.Message)
+        }
+    }
+    try {
         Start-Process -FilePath '@TARGET_EXE@'
         Write-UpdateLog 'Restarted the previous version.'
     }

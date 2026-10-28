@@ -34,21 +34,22 @@ def test_install_script_is_ascii_and_contains_required_steps(tmp_path: Path) -> 
     # 脚本正文不得含中文：PowerShell 5.1 读取非 ASCII 字符时容易乱码。
     assert text.isascii()
     assert "Wait-Process -Id 4321 -Timeout 60" in text
-    # 先复制到同目录的 .new 暂存文件，再用 Move-Item 原子替换目标
-    assert f"Copy-Item -LiteralPath '{new_exe}' -Destination '{target}.new' -Force" in text
-    assert f"Move-Item -LiteralPath '{target}.new' -Destination '{target}' -Force" in text
+    # 优先用 .NET 的原子替换，绝不在目标目录产生 .new 之类的旁路文件
+    assert f"[System.IO.File]::Replace('{new_exe}', '{target}', [NullString]::Value)" in text
+    assert f"Copy-Item -LiteralPath '{new_exe}' -Destination '{target}' -Force" in text
+    assert ".new" not in text
+    assert "Move-Item" not in text
     assert f"Start-Process -FilePath '{target}'" in text
-    # 失败分支：清理暂存文件并按备份回滚
-    assert f"Remove-Item -LiteralPath '{target}.new'" in text
+    # 失败分支：按 AppData 里的备份还原目标并重启旧版
     assert f"$backupExe = '{backup}'" in text
     assert "Test-Path -LiteralPath $backupExe" in text
     assert f"Copy-Item -LiteralPath $backupExe -Destination '{target}' -Force" in text
+    assert "Restored the backup exe." in text
     assert str(work_dir / UPDATE_LOG_NAME) in text
-    # 顺序必须是：等待旧进程 → 暂存拷贝 → 原子替换 → 重启
+    # 顺序必须是：等待旧进程 → 原子替换 → 重启
     positions = [
         text.index("Wait-Process -Id"),
-        text.index("Copy-Item -LiteralPath '" + str(new_exe) + "'"),
-        text.index("Move-Item -LiteralPath"),
+        text.index("[System.IO.File]::Replace("),
         text.index("Start-Process -FilePath"),
     ]
     assert positions == sorted(positions)
