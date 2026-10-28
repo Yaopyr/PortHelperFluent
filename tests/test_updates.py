@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.error
 from pathlib import Path
@@ -42,6 +43,7 @@ from app.services.updates import (
     updates_dir,
     verify_sha256,
 )
+from app.ui.qt_utils import process_events_until
 
 EXE_URL = "https://github.com/Yaopyr/PortHelperFluent/releases/download/v1.0.1/PortHelperFluent.exe"
 CHECKSUM_URL = "https://github.com/Yaopyr/PortHelperFluent/releases/download/v1.0.1/SHA256.txt"
@@ -100,9 +102,11 @@ class FakeDownloader:
     def __init__(self, contents: dict[str, bytes]) -> None:
         self.contents = contents
         self.calls: list[str] = []
+        self.progress_values: list[object] = []
 
     def __call__(self, url, dest, *, progress=None, cancel=None):
         self.calls.append(url)
+        self.progress_values.append(progress)
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(self.contents[url])
@@ -368,6 +372,23 @@ def test_download_asset_rechecks_redirected_host(tmp_path: Path) -> None:
     assert not (tmp_path / "app.exe").exists()
 
 
+def test_download_asset_reports_network_error_while_reading(tmp_path: Path) -> None:
+    class BrokenResponse(FakeResponse):
+        def read(self, size: int = -1) -> bytes:
+            raise OSError("connection reset by peer")
+
+    dest = tmp_path / "app.exe"
+
+    with pytest.raises(UpdateError) as excinfo:
+        download_asset(EXE_URL, dest, opener=FakeOpener(BrokenResponse(url=EXE_URL)))
+
+    message = str(excinfo.value)
+    assert message.startswith("下载更新失败")
+    assert "保存更新文件失败" not in message
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
 # ---- 下载并校验 Release ------------------------------------------------------
 
 
@@ -392,15 +413,61 @@ def test_download_release_falls_back_to_checksum_asset(tmp_path: Path) -> None:
     downloader = FakeDownloader(
         {EXE_URL: payload, CHECKSUM_URL: f"{digest}  PortHelperFluent.exe\n".encode()}
     )
+    progress_values: list[tuple[int, int]] = []
+
+    def progress(received: int, total: int) -> None:
+        progress_values.append((received, total))
 
     path = download_release(
-        _release(exe=exe, checksum=checksum), tmp_path, downloader=downloader
+        _release(exe=exe, checksum=checksum), tmp_path, progress=progress, downloader=downloader
     )
 
     assert path.exists()
     assert downloader.calls == [EXE_URL, CHECKSUM_URL]
+    # 校验文件不推送主下载进度，避免界面进度条回退
+    assert downloader.progress_values == [progress, None]
     # 校验文件用完即删，不在更新目录留下残留
     assert not (tmp_path / CHECKSUM_ASSET_NAME).exists()
+
+
+def test_download_release_rejects_unsafe_remote_version(tmp_path: Path) -> None:
+    payload = b"exe"
+    digest = hashlib.sha256(payload).hexdigest()
+    exe = ReleaseAsset(EXE_ASSET_NAME, EXE_URL, len(payload), f"sha256:{digest}")
+    downloader = FakeDownloader({EXE_URL: payload})
+
+    target = download_release(
+        _release(version="x/../../evil", exe=exe), tmp_path, downloader=downloader
+    )
+
+    # 远端 tag 不可信：净化后仍然只能写在 work_dir 内
+    assert target.parent == tmp_path
+    assert "/" not in target.name and "\\" not in target.name
+    assert ".." not in target.name
+    assert target.name.startswith("PortHelperFluent-")
+
+
+def test_download_release_removes_exe_when_checksum_stage_fails(
+    tmp_path: Path,
+) -> None:
+    payload = b"exe-bytes"
+    exe = ReleaseAsset(EXE_ASSET_NAME, EXE_URL, len(payload), "")
+    checksum = ReleaseAsset(CHECKSUM_ASSET_NAME, CHECKSUM_URL, 10, "")
+
+    class FailingChecksum(FakeDownloader):
+        def __call__(self, url, dest, *, progress=None, cancel=None):
+            if url == CHECKSUM_URL:
+                raise UpdateError("下载更新失败：网络已断开，请检查网络后重试。")
+            return super().__call__(url, dest, progress=progress, cancel=cancel)
+
+    downloader = FailingChecksum({EXE_URL: payload})
+
+    with pytest.raises(UpdateError) as excinfo:
+        download_release(_release(exe=exe, checksum=checksum), tmp_path, downloader=downloader)
+
+    assert "网络" in str(excinfo.value)
+    # 取校验值失败时也必须删除已下载的 exe，不能留下未验证的文件
+    assert list(tmp_path.glob("*.exe")) == []
 
 
 def test_download_release_requires_checksum_info(tmp_path: Path) -> None:
@@ -579,15 +646,35 @@ def test_download_worker_reports_update_error(qapp, tmp_path: Path) -> None:
 
 
 def test_download_worker_maps_interruption_to_cancel(qapp, tmp_path: Path) -> None:
-    captured: dict[str, object] = {}
+    started = threading.Event()
+    observed: list[bool] = []
 
     def runner(release, work_dir, *, progress=None, cancel=None):
-        captured["cancel"] = cancel
+        started.set()
+        # 真调用传入的 cancel()：等待主线程 requestInterruption() 后应变为 True。
+        # （Qt 只在 worker 真正运行时记录中断请求，因此这里必须启动线程。）
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if cancel():
+                observed.append(True)
+                raise UpdateError("下载已取消。")
+            time.sleep(0.01)
+        observed.append(False)
         return work_dir / "PortHelperFluent-1.0.1.exe"
 
     worker = UpdateDownloadWorker(_release(), tmp_path, runner=runner)
-    worker.isInterruptionRequested = lambda: True
+    failed: list[str] = []
+    worker.failed.connect(failed.append)
 
-    worker.run()
+    worker.start()
+    try:
+        assert started.wait(2)
+        worker.requestInterruption()
+        assert worker.wait(3000)
+    finally:
+        worker.wait(3000)
 
-    assert captured["cancel"]() is True
+    assert observed == [True]
+    # 跨线程的信号通过事件队列投递，等待期间处理一次事件循环。
+    assert process_events_until(lambda: failed, timeout_ms=1000)
+    assert failed == ["下载已取消。"]

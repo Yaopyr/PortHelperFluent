@@ -45,7 +45,9 @@ _PRUNE_PATTERNS = ("PortHelperFluent-*.exe", "*.part", "apply-update.ps1", "upda
 _VERSION_CORE = re.compile(r"[-+\s]")
 _NUMERIC_PREFIX = re.compile(r"^\d+")
 _SHA256_PATTERN = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+_UNSAFE_FILE_CHARS = re.compile(r"[^0-9A-Za-z._-]")
 _DIGEST_PREFIX = "sha256:"
+UNKNOWN_FILE_VERSION = "unknown"
 
 ProgressCallback = Callable[[int, int], None]
 CancelCallback = Callable[[], bool]
@@ -231,7 +233,7 @@ def download_asset(
                 while True:
                     if cancel is not None and cancel():
                         raise UpdateError("下载已取消。")
-                    chunk = response.read(CHUNK_SIZE)  # type: ignore[attr-defined]
+                    chunk = _read_chunk(response)
                     if not chunk:
                         break
                     handle.write(chunk)
@@ -314,9 +316,10 @@ def download_release(
 ) -> Path:
     """下载 Release 的 exe 并校验 SHA-256，返回本地路径。
 
-    目标文件名固定为 `PortHelperFluent-{version}.exe`（不采信远端文件名）。
+    目标文件名固定为 `PortHelperFluent-{版本}.exe`，版本串先经 `_safe_file_version`
+    净化（远端 tag 不可信，防止 `../` 之类写到更新目录之外），不采信远端文件名。
     校验值优先取 API 的 `assets[].digest`，否则下载 `SHA256.txt` 解析；两者都
-    没有则拒绝安装。哈希不符时删除下载文件。缺少 exe 资产同样直接拒绝。
+    没有则拒绝安装。下载、取校验值、校验任一环节失败都会删除已下载的 exe。
     """
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -326,28 +329,42 @@ def download_release(
     if _asset_digest(asset) is None and (release.checksum is None or not release.checksum.url):
         # 没有校验依据时连下载都不做，避免留下无法验证的文件。
         raise UpdateError("发布缺少 SHA-256 校验信息，已取消更新。")
-    target = work_dir / f"PortHelperFluent-{release.version}.exe"
+    target = work_dir / f"PortHelperFluent-{_safe_file_version(release.version)}.exe"
     try:
         downloader(asset.url, target, progress=progress, cancel=cancel)
     except UpdateError:
         raise
     except OSError as exc:
         raise UpdateError(f"保存更新文件失败：{exc}。") from exc
-    expected = _asset_digest(asset)
-    if expected is None and release.checksum is not None and release.checksum.url:
-        expected = _checksum_from_asset(
-            release.checksum, work_dir, downloader, progress, cancel
-        )
-    if expected is None:
+    try:
+        expected = _asset_digest(asset)
+        if expected is None and release.checksum is not None and release.checksum.url:
+            expected = _checksum_from_asset(release.checksum, work_dir, downloader, cancel)
+        if expected is None:
+            raise UpdateError("发布缺少 SHA-256 校验信息，已取消更新。")
+        if not verify_sha256(target, expected):
+            raise UpdateError("下载文件校验失败（SHA-256 不匹配），已删除。")
+    except BaseException:
+        # 取校验值或校验失败时都不留下未经确认的 exe。
         target.unlink(missing_ok=True)
-        raise UpdateError("发布缺少 SHA-256 校验信息，已取消更新。")
-    if not verify_sha256(target, expected):
-        target.unlink(missing_ok=True)
-        raise UpdateError("下载文件校验失败（SHA-256 不匹配），已删除。")
+        raise
     return target
 
 
 # ---- 内部辅助 ---------------------------------------------------------------
+
+
+def _safe_file_version(text: str) -> str:
+    """把不可信的远端版本串收敛成安全的文件名片段。
+
+    只保留 `[0-9A-Za-z._-]`，路径分隔符、`..` 等一律替换为 `_`，空结果回退
+    `unknown`。`ReleaseInfo.version` 仍保留原值供界面展示，只有文件名用它。
+    """
+    cleaned = _UNSAFE_FILE_CHARS.sub("_", str(text or "").strip())
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", "_")
+    cleaned = cleaned.strip("._")
+    return cleaned or UNKNOWN_FILE_VERSION
 
 
 def _as_int(value: object) -> int:
@@ -443,16 +460,29 @@ def _checksum_from_asset(
     asset: ReleaseAsset,
     work_dir: Path,
     downloader: Callable[..., Path],
-    progress: ProgressCallback | None,
     cancel: CancelCallback | None,
 ) -> str | None:
-    """下载校验文件并解析哈希；用完即删，不在更新目录留下残留。"""
+    """下载校验文件并解析哈希；用完即删，不在更新目录留下残留。
+
+    校验文件很小，不推送主下载的进度回调（`progress=None`），避免界面进度条回退。
+    """
     checksum_path = work_dir / CHECKSUM_ASSET_NAME
     try:
-        downloader(asset.url, checksum_path, progress=progress, cancel=cancel)
+        downloader(asset.url, checksum_path, progress=None, cancel=cancel)
         text = checksum_path.read_text(encoding="utf-8", errors="replace")
         return parse_checksum(text)
     except OSError as exc:
         raise UpdateError(f"下载校验文件失败：{exc}。") from exc
     finally:
         checksum_path.unlink(missing_ok=True)
+
+
+def _read_chunk(response) -> bytes:
+    """读取下载响应的一块数据；网络错误翻译成中文 `UpdateError`。
+
+    磁盘写入失败不在这里处理：那属于“保存失败”，由调用方按写入异常解释。
+    """
+    try:
+        return response.read(CHUNK_SIZE)  # type: ignore[attr-defined]
+    except OSError as exc:
+        raise UpdateError(f"下载更新失败：{exc}，请检查网络后重试。") from exc

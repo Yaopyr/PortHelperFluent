@@ -1,17 +1,22 @@
 """Windows 自替换安装：生成 PowerShell 脚本，退出后替换 exe 并重启。
 
 应用自身无法覆盖正在运行的 exe，因此先写一个脚本，再用 `DETACHED_PROCESS` 启动
-独立进程执行：等待旧进程退出 → 覆盖目标 exe → 写 `update.log` → 重启新版本。
+独立进程执行：等待旧进程退出 → 把新 exe 复制成 `<target>.new` 暂存文件 → 用
+`Move-Item -Force` 原子替换目标（同目录同卷）→ 写 `update.log` → 重启新版本；
+替换失败时清理暂存文件、用备份回滚并重启旧版。
+
 脚本正文只用 ASCII 英文（PowerShell 5.1 在无 BOM 时会按 ANSI 解码），并以带 BOM
 的 UTF-8 落盘，保证路径里出现中文用户名时也不会乱码；路径一律单引号包裹并把
 `'` 双写成 `''`。备份、脚本与日志都写在 `work_dir`（即 `data_dir/updates`），
-绝不在 exe 所在目录新增文件。
+exe 目录里只会短暂出现 `<target>.new`（原子替换必须同目录暂存，成功即改名、
+失败即删除）。
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -24,6 +29,7 @@ from app.services.updates import UpdateError
 INSTALL_SCRIPT_NAME = "apply-update.ps1"
 UPDATE_LOG_NAME = "update.log"
 BACKUP_PREFIX = "backup-PortHelperFluent-"
+UPDATE_LOG_MAX_BYTES = 1024 * 1024
 
 # subprocess 的这两个常量只在 Windows 上定义，非 Windows 解释器用数值兜底。
 _DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
@@ -38,12 +44,15 @@ _POWERSHELL_ARGS = (
     "-File",
 )
 
-# 脚本正文：@NEW_EXE@ / @TARGET_EXE@ / @LOG_PATH@ / @TARGET_PID@ 由 write_install_script 替换。
-# 注意 PowerShell 的 $PID 是只读自动变量，等待用的进程号必须换个名字。
+# 脚本正文：@NEW_EXE@ / @TARGET_EXE@ / @BACKUP_EXE@ / @LOG_PATH@ / @TARGET_PID@
+# 由 write_install_script 替换。注意 PowerShell 的 $PID 是只读自动变量，等待用的
+# 进程号直接内联，不定义同名变量。
 _SCRIPT_TEMPLATE = """# PortHelper Fluent update script. Generated automatically, ASCII-only.
 $ErrorActionPreference = 'Continue'
 $newExe = '@NEW_EXE@'
 $targetExe = '@TARGET_EXE@'
+$stagingExe = '@TARGET_EXE@.new'
+$backupExe = '@BACKUP_EXE@'
 $logPath = '@LOG_PATH@'
 
 function Write-UpdateLog([string]$message) {
@@ -60,8 +69,10 @@ try {
         Write-UpdateLog ('Wait-Process skipped: ' + $_.Exception.Message)
     }
     Start-Sleep -Milliseconds 900
-    Copy-Item -LiteralPath '@NEW_EXE@' -Destination '@TARGET_EXE@' -Force -ErrorAction Stop
-    Write-UpdateLog 'Copy-Item succeeded.'
+    Copy-Item -LiteralPath '@NEW_EXE@' -Destination '@TARGET_EXE@.new' -Force -ErrorAction Stop
+    Write-UpdateLog ('Staged the new exe as ' + $stagingExe)
+    Move-Item -LiteralPath '@TARGET_EXE@.new' -Destination '@TARGET_EXE@' -Force -ErrorAction Stop
+    Write-UpdateLog 'Move-Item replaced the target exe.'
     Start-Process -FilePath '@TARGET_EXE@'
     Write-UpdateLog 'Restart requested.'
     Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue
@@ -69,7 +80,12 @@ try {
 }
 catch {
     Write-UpdateLog ('Update failed: ' + $_.Exception.Message)
+    Remove-Item -LiteralPath '@TARGET_EXE@.new' -Force -ErrorAction SilentlyContinue
     try {
+        if (Test-Path -LiteralPath $backupExe) {
+            Copy-Item -LiteralPath $backupExe -Destination '@TARGET_EXE@' -Force -ErrorAction Stop
+            Write-UpdateLog 'Restored the backup exe.'
+        }
         Start-Process -FilePath '@TARGET_EXE@'
         Write-UpdateLog 'Restarted the previous version.'
     }
@@ -81,9 +97,26 @@ catch {
 
 
 def can_replace(target: Path) -> bool:
-    """目标 exe 所在目录是否可写；不可写时更新只能提示用户手动替换。"""
+    """目标 exe 是否可以就地替换。
+
+    目标已存在时先看只读属性，再尝试以 `r+b` 打开它（只打开、不写任何字节），
+    这样既验证写权限，也不会在 exe 目录留下探针文件。正在运行的 exe 会被系统
+    以共享冲突拒绝写句柄——这属于预期状态（替换由退出后的脚本完成），此时退回
+    目录探针判断；目标不存在（首次安装或路径异常）同样用目录探针。
+    """
+    target = Path(target)
     try:
-        probe_write(Path(target).parent)
+        if target.exists():
+            if not target.stat().st_mode & stat.S_IWRITE:
+                return False
+            try:
+                with target.open("r+b"):
+                    pass
+            except PermissionError:
+                # 运行中的映像文件无法获得写句柄，能否替换取决于目标目录是否可写。
+                probe_write(target.parent)
+            return True
+        probe_write(target.parent)
     except OSError:
         return False
     return True
@@ -99,6 +132,7 @@ def write_install_script(
     content = (
         _SCRIPT_TEMPLATE.replace("@NEW_EXE@", _ps_escape(new_exe))
         .replace("@TARGET_EXE@", _ps_escape(target))
+        .replace("@BACKUP_EXE@", _ps_escape(_backup_path(work_dir)))
         .replace("@LOG_PATH@", _ps_escape(work_dir / UPDATE_LOG_NAME))
         .replace("@TARGET_PID@", str(int(pid)))
     )
@@ -118,7 +152,7 @@ def install_update(
     """备份旧 exe、写脚本并后台启动它；返回脚本路径。
 
     只支持 Windows（其他平台抛 `UpdateError`）。`popen` 可注入以便测试；备份
-    失败只记日志，不阻断替换。
+    失败只记日志，不阻断替换（脚本失败时会再尝试用备份回滚）。
     """
     if os.name != "nt":
         raise UpdateError("自动安装仅支持 Windows。")
@@ -126,11 +160,13 @@ def install_update(
     target = Path(target)
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    backup = work_dir / f"{BACKUP_PREFIX}{APP_VERSION}.exe"
+    _rotate_update_log(work_dir)
     try:
-        shutil.copy2(target, backup)
+        shutil.copy2(target, _backup_path(work_dir))
     except OSError:
-        get_logger().warning("备份旧版本 exe 失败：%s", backup, exc_info=True)
+        get_logger().warning(
+            "备份旧版本 exe 失败：%s", _backup_path(work_dir), exc_info=True
+        )
     script_path = write_install_script(
         new_exe, target, work_dir, pid=pid if pid is not None else os.getpid()
     )
@@ -146,6 +182,25 @@ def install_update(
             f"启动更新脚本失败：{exc}。请手动运行 {script_path} 完成替换。"
         ) from exc
     return script_path
+
+
+def _backup_path(work_dir: Path) -> Path:
+    """旧版本备份文件路径（脚本回滚与手工恢复都用它）。"""
+    return Path(work_dir) / f"{BACKUP_PREFIX}{APP_VERSION}.exe"
+
+
+def _rotate_update_log(work_dir: Path) -> None:
+    """启动脚本前把超过 1 MB 的 update.log 轮转为 update.log.old。
+
+    `prune_updates` 会清理过期的 `update.log.old`，因此日志不会无限增长也不会堆积。
+    轮转失败只记日志，不阻断更新。
+    """
+    log_path = Path(work_dir) / UPDATE_LOG_NAME
+    try:
+        if log_path.is_file() and log_path.stat().st_size > UPDATE_LOG_MAX_BYTES:
+            os.replace(log_path, log_path.with_name(f"{UPDATE_LOG_NAME}.old"))
+    except OSError:
+        get_logger().warning("轮转更新日志失败：%s", log_path, exc_info=True)
 
 
 def _ps_escape(path: Path) -> str:
