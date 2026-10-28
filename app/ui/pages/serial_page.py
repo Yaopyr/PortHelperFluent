@@ -10,8 +10,10 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
+    QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -126,9 +128,10 @@ class SerialPage(QWidget):
         root.addWidget(splitter, 1)
 
     def _build_left_column(self) -> QWidget:
-        left = QWidget(self)
-        left.setMinimumWidth(320)
-        layout = QVBoxLayout(left)
+        # 左栏内容高于窗口时允许滚动，避免卡片把下拉框压扁造成重叠。
+        content = QWidget(self)
+        content.setMinimumWidth(320)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
@@ -241,7 +244,14 @@ class SerialPage(QWidget):
         action_layout.addWidget(self.reset_counter_button)
         layout.addWidget(action_card)
         layout.addStretch(1)
-        return left
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setMinimumWidth(320)
+        return scroll
 
     def _build_right_column(self) -> QWidget:
         right = QWidget(self)
@@ -254,8 +264,8 @@ class SerialPage(QWidget):
         log_layout.setContentsMargins(12, 12, 12, 12)
         log_layout.setSpacing(8)
         self.log_tabs = TabWidget(log_card)
-        self.rx_log = LogPane("接收区", show_direction=False, settings=self.settings, parent=self.log_tabs)
-        self.tx_log = LogPane("发送记录", show_direction=False, settings=self.settings, parent=self.log_tabs)
+        self.rx_log = LogPane("", show_direction=False, settings=self.settings, parent=self.log_tabs)
+        self.tx_log = LogPane("", show_direction=False, settings=self.settings, parent=self.log_tabs)
         self.rx_log.log_view.setPlaceholderText("串口接收到的数据会显示在这里")
         self.tx_log.log_view.setPlaceholderText("已发送的数据会显示在这里")
         self.log_tabs.addTab(self.rx_log, "接收区", FluentIcon.DOWNLOAD)
