@@ -15,7 +15,7 @@
 - 更新文件（下载包、`.part`、备份、安装脚本、`update.log`）统一放在 `%APPDATA%\PortHelperFluent\updates`，不会在 exe 所在目录（如桌面）留下文件；便携模式落在 `data\updates`。
 - 设置页「更新」卡片：当前版本、启动时检查开关（`ui.check_updates_on_start`，关闭后启动时不再检查、手动检查仍可用）、状态与进度、下载并安装按钮。
 - 源码运行时不执行替换，只提示已下载路径；程序目录不可写时拒绝自动安装并给出提示。
-- 682 项 pytest 测试；更新模块与安装器全部用注入的假 opener/假 popen 覆盖，不产生真实网络请求。
+- 683 项 pytest 测试；更新模块与安装器全部用注入的假 opener/假 popen 覆盖，不产生真实网络请求。
 
 ### Changed
 

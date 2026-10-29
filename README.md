@@ -6,7 +6,7 @@
   ![Platform](https://img.shields.io/badge/platform-Windows%2011-0A84FF)
   ![Python](https://img.shields.io/badge/python-3.13-3776AB)
   ![PyQt6](https://img.shields.io/badge/PyQt6-6.11-41CD52)
-  ![Tests](https://img.shields.io/badge/tests-682%20passed-0F7B0F)
+  ![Tests](https://img.shields.io/badge/tests-683%20passed-0F7B0F)
   ![License](https://img.shields.io/badge/license-MIT-blue)
 </div>
 
@@ -135,7 +135,7 @@ porthelper-fluent/
 ├─ analysis/       # 逆向文字证据与解析脚本（原始二进制/图片资源不提交）
 ├─ build/          # PyInstaller spec、构建脚本、图标、版本信息
 ├─ docs/           # 架构、构建、使用、逆向说明、设计规格与实施计划
-├─ tests/          # pytest 测试（682 项）
+├─ tests/          # pytest 测试（683 项）
 ├─ main.py         # 应用入口与自检
 ├─ requirements.txt
 └─ pytest.ini
@@ -177,7 +177,7 @@ python -m pytest
 
 当前仓库状态：
 
-- **682 项测试通过**（pytest，离屏 Qt，无真实串口/HID 依赖）。
+- **683 项测试通过**（pytest，离屏 Qt，无真实串口/HID 依赖）。
 - 覆盖校验已知向量、CRC 独立参考、8051 定时/波特率寄存器、RGB565/RGB332、扫描方向/字节序、字模位序/分页、配置损坏恢复、便携目录回退、TCP/UDP 回环、串口/HID 假传输、打包 selftest/smoke。
 - 打包后的 exe 在隔离 `APPDATA`、空 `PYTHONUSERBASE`/`PYTHONPATH` 的临时目录中通过 `--selftest` 与 `--smoke-test`。
 - 真实串口/HID 设备读写、Keil 打开生成的工程属于手工验收项。
