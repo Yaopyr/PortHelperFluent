@@ -19,7 +19,7 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Coroutine, Protocol
+from typing import Any, Awaitable, Callable, Coroutine, Protocol
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
@@ -36,6 +36,7 @@ CHANNEL_RFCOMM = "RFCOMM"
 PAIR_SUCCESS = frozenset({"PAIRED", "ALREADY_PAIRED"})
 ALREADY_PAIRED_TEXT = "已配对，跳过配对"
 NOT_CONNECTED_MESSAGE = "经典蓝牙未连接"
+SPP_SERVICE_MISSING_MESSAGE = "设备未提供 SPP 串口服务"
 NOT_RUNNING_MESSAGE = "经典蓝牙后台线程未运行，请重新扫描"
 SERIAL_CLOSED_MESSAGE = "串口已关闭"
 SHUTDOWN_REASON = "程序退出"
@@ -94,12 +95,82 @@ def _to_classic_device(info: Any) -> ClassicDeviceInfo:
     )
 
 
+def _address_to_int(address: str) -> int | None:
+    """`"AA:BB:CC:DD:EE:FF"` → 蓝牙地址整数（`BluetoothDevice` 的入参格式）。"""
+    text = str(address or "").replace(":", "").replace("-", "").strip()
+    if len(text) != 12:
+        return None
+    try:
+        return int(text, 16)
+    except ValueError:
+        return None
+
+
+async def _winrt_service_from_device_id(device_id: str) -> Any:
+    from winrt.windows.devices.bluetooth.rfcomm import RfcommDeviceService
+
+    return await RfcommDeviceService.from_id_async(device_id)
+
+
+async def _winrt_service_from_address(address_int: int) -> Any:
+    from winrt.windows.devices.bluetooth import BluetoothDevice
+    from winrt.windows.devices.bluetooth.rfcomm import RfcommServiceId
+
+    bt_device = await BluetoothDevice.from_bluetooth_address_async(address_int)
+    if bt_device is None:
+        return None
+    result = await bt_device.get_rfcomm_services_for_id_async(RfcommServiceId.serial_port)
+    services = list(getattr(result, "services", None) or [])
+    return services[0] if services else None
+
+
+class WinRtRfcommLocator:
+    """拿到设备的 SPP `RfcommDeviceService`。
+
+    扫描 watcher 给的是**设备级 AEP ID**（`DeviceInformationKind.DEVICE`），而
+    `RfcommDeviceService.from_id_async` 要的是 `System.Devices.AepService.*` 维度的
+    **RFCOMM 服务 ID**：拿设备 ID 直查在多数系统上返回 None 或抛 `OSError E_FAIL`。
+    所以先试设备 ID（个别系统能直接命中），失败再按蓝牙地址取本机的 `serial_port` 服务。
+
+    两个 hook 都可以注入，测试用它锁住「先设备 ID、再地址」的顺序，不碰真实 WinRT。
+    """
+
+    def __init__(
+        self,
+        *,
+        from_device_id: Callable[[str], Awaitable[Any]] | None = None,
+        from_address: Callable[[int], Awaitable[Any]] | None = None,
+    ) -> None:
+        self._from_device_id = from_device_id or _winrt_service_from_device_id
+        self._from_address = from_address or _winrt_service_from_address
+
+    async def locate(self, device: ClassicDeviceInfo) -> Any:
+        service = await self._try(self._from_device_id, device.device_id)
+        if service is not None:
+            return service
+        address_int = _address_to_int(device.address)
+        if address_int is not None:
+            service = await self._try(self._from_address, address_int)
+            if service is not None:
+                return service
+        raise RuntimeError(SPP_SERVICE_MISSING_MESSAGE)
+
+    async def _try(self, factory: Callable[[Any], Awaitable[Any]], argument: Any) -> Any | None:
+        try:
+            return await factory(argument)
+        except Exception:
+            # 两条路径都可能以异常表示「这个 ID 上没有服务」，统一当作没找到。
+            get_logger().debug("解析 RFCOMM 服务失败：%s", argument, exc_info=True)
+            return None
+
+
 class WinRtSppBackend:
     """WinRT 3.2.1 实现：设备 watcher 扫描、自定义配对、RFCOMM socket 收发。"""
 
-    def __init__(self) -> None:
+    def __init__(self, locator: WinRtRfcommLocator | None = None) -> None:
         self._data_cb: Callable[[bytes], None] | None = None
         self._prompt_cb: Callable[[str, str], str | None] | None = None
+        self._locator = locator if locator is not None else WinRtRfcommLocator()
         self._socket = None
         self._reader = None
         self._reader_task: asyncio.Task | None = None
@@ -182,13 +253,10 @@ class WinRtSppBackend:
     # ---- RFCOMM 连接与收发 ---------------------------------------------
 
     async def connect(self, device: ClassicDeviceInfo) -> None:
-        from winrt.windows.devices.bluetooth.rfcomm import RfcommDeviceService
         from winrt.windows.networking.sockets import StreamSocket
         from winrt.windows.storage.streams import DataReader, InputStreamOptions
 
-        service = await RfcommDeviceService.from_id_async(device.device_id)
-        if service is None:
-            raise RuntimeError("设备未提供 SPP 串口服务")
+        service = await self._locator.locate(device)
         socket = StreamSocket()
         try:
             await socket.connect_async(
@@ -297,6 +365,7 @@ class SppWorker(AsyncLoopWorker):
         self._silent_close = threading.Event()
         self._async_teardown = threading.Event()
         self._closing = threading.Event()
+        self._connect_cancelled = threading.Event()
         self._prompt_lock = threading.Lock()
         self._prompt_value: str | None = None
         self._prompt_ready = threading.Event()
@@ -354,6 +423,7 @@ class SppWorker(AsyncLoopWorker):
             if self._connecting or self._connected or self._channel or self._serial is not None:
                 # 连接在飞或已有通道：再连会留下第二条泄漏连接。
                 return False
+            self._connect_cancelled.clear()
             self._connecting = True
         if not self._submit_or_report(lambda: self._connect_coroutine(device)):
             with self._state_lock:
@@ -378,8 +448,9 @@ class SppWorker(AsyncLoopWorker):
             except TimeoutError:
                 self.error.emit(explain_error("connect", "连接超时"))
                 return
-            if self._closing.is_set():
-                # 关停已经开始了：这条连接建得太晚，直接关掉，别把 socket 留在后台线程里。
+            if self._closing.is_set() or self._connect_cancelled.is_set():
+                # 关停开始、或用户在连接中点过断开：这条连接建得太晚，直接关掉，
+                # 既不置通道状态也不发 connected，界面不会出现「断开后又连上」。
                 await self._backend.close()
                 return
             with self._state_lock:
@@ -389,14 +460,24 @@ class SppWorker(AsyncLoopWorker):
         finally:
             with self._state_lock:
                 self._connecting = False
+            self._connect_cancelled.clear()
 
     async def _pair_device(self, device: ClassicDeviceInfo) -> str:
         """跑一次配对；失败文案在返回前就发出去，返回的状态不成功时调用方直接收尾。"""
         try:
-            status = await asyncio.wait_for(self._backend.pair(device), PAIR_TIMEOUT)
+            # 预算要把用户输入 PIN 的时间算进去，否则第 25 秒才答完就只剩几秒握手。
+            status = await asyncio.wait_for(
+                self._backend.pair(device), PAIR_TIMEOUT + float(self.PROMPT_TIMEOUT)
+            )
         except TimeoutError:
             self.pairing_finished.emit("配对超时，请重试")
             self.error.emit(explain_error("pair", "配对超时"))
+            return ""
+        except Exception as exc:
+            # 后端自己抛异常（例如系统里已找不到该设备）也必须收尾配对状态，
+            # 否则界面会一直停在「配对中」等一个永远不来的结果。
+            self.pairing_finished.emit("配对失败")
+            self.error.emit(self._describe_error(exc))
             return ""
         if status in PAIR_SUCCESS:
             return status
@@ -492,11 +573,16 @@ class SppWorker(AsyncLoopWorker):
             channel, self._channel = self._channel, ""
             serial, self._serial = self._serial, None
             self._connected = False
+            connecting = self._connecting
         if serial is not None:
             self._close_serial(serial)
             self.disconnected.emit(reason)
             return True
         if not channel:
+            if connecting:
+                # 连接还在飞：挂上取消标志，连接协程建好 socket 后会自己关掉，
+                # 否则「断开」返回 True 之后连接照样建立。
+                self._connect_cancelled.set()
             # 幂等：没有通道也安全返回，且不发 disconnected。
             return True
         self._async_teardown.clear()

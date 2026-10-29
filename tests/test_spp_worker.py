@@ -11,10 +11,12 @@ import asyncio
 import threading
 import time
 
+import pytest
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
+import app.io.spp_worker as spp_worker
 from app.io.serial_worker import SerialConfig
-from app.io.spp_worker import ClassicDeviceInfo, SppWorker
+from app.io.spp_worker import ClassicDeviceInfo, SppWorker, WinRtRfcommLocator
 
 DIRECT = Qt.ConnectionType.DirectConnection
 PAIRED_DEVICE = ClassicDeviceInfo("已配对设备", "11:22:33:44:55:66", True, "id-paired")
@@ -32,8 +34,10 @@ class FakeSppBackend:
         self.prompt_kind = "pin"
         self.prompt_answer: str | None = None
         self.connect_delay = 0.0
+        self.pair_delay = 0.0
         self.fail_on: str | None = None
         self.closed = False
+        self.closed_event = threading.Event()
         self.sent: list[bytes] = []
         self.data_cb = None
         self.prompt_cb = None
@@ -63,6 +67,8 @@ class FakeSppBackend:
         self.calls.append(("pair", device.address))
         if self.fail_on == "pair":
             raise RuntimeError("配对时蓝牙已关闭")
+        if self.pair_delay:
+            await asyncio.sleep(self.pair_delay)
         if self.prompt_enabled:
             # 真实实现里 WinRT 的配对回调就是这样同步阻塞等用户输入。
             self.prompt_answer = self.prompt_cb(self.prompt_kind, "请输入配对码")
@@ -87,6 +93,7 @@ class FakeSppBackend:
     async def close(self) -> None:
         self.calls.append(("close",))
         self.closed = True
+        self.closed_event.set()
 
 
 class FakeSerialWorker(QObject):
@@ -126,6 +133,59 @@ class FakeSerialWorker(QObject):
 
     def is_open(self) -> bool:
         return self._open
+
+
+def test_rfcomm_locator_prefers_device_id_service():
+    service = object()
+    calls: list[tuple] = []
+
+    async def from_device_id(device_id: str):
+        calls.append(("from_device_id", device_id))
+        return service
+
+    async def from_address(address_int: int):
+        calls.append(("from_address", address_int))
+        return object()
+
+    locator = WinRtRfcommLocator(from_device_id=from_device_id, from_address=from_address)
+    assert asyncio.run(locator.locate(PAIRED_DEVICE)) is service
+    # 设备 ID 直查命中就不要再去按地址找服务。
+    assert calls == [("from_device_id", "id-paired")]
+
+
+def test_rfcomm_locator_falls_back_to_serial_port_service_by_address():
+    service = object()
+    calls: list[tuple] = []
+
+    async def from_device_id(device_id: str):
+        calls.append(("from_device_id", device_id))
+        # 本机实测：设备级 AEP ID 走 from_id_async 会抛 E_FAIL。
+        raise OSError(0x80004005, "E_FAIL")
+
+    async def from_address(address_int: int):
+        calls.append(("from_address", address_int))
+        return service
+
+    locator = WinRtRfcommLocator(from_device_id=from_device_id, from_address=from_address)
+    assert asyncio.run(locator.locate(PAIRED_DEVICE)) is service
+    assert calls == [("from_device_id", "id-paired"), ("from_address", 0x112233445566)]
+
+
+def test_rfcomm_locator_raises_when_no_service_found():
+    calls: list[tuple] = []
+
+    async def from_device_id(device_id: str):
+        calls.append(("from_device_id", device_id))
+        return None
+
+    async def from_address(address_int: int):
+        calls.append(("from_address", address_int))
+        return None
+
+    locator = WinRtRfcommLocator(from_device_id=from_device_id, from_address=from_address)
+    with pytest.raises(RuntimeError, match="SPP 串口服务"):
+        asyncio.run(locator.locate(PAIRED_DEVICE))
+    assert [call[0] for call in calls] == ["from_device_id", "from_address"]
 
 
 def test_scan_emits_paired_and_unpaired_devices(qapp):
@@ -457,5 +517,69 @@ def test_rfcomm_and_com_channels_are_mutually_exclusive(qapp):
         assert worker.open_com(SerialConfig("COM7", 115200)) is True
         assert worker.channel() == "COM7"
         assert worker.connect_device(PAIRED_DEVICE) is False
+    finally:
+        worker.shutdown()
+
+
+def test_pair_error_ends_pairing_state(qapp):
+    backend = FakeSppBackend()
+    backend.fail_on = "pair"
+    worker = SppWorker(backend)
+    pairing_finished: list[str] = []
+    errors: list[str] = []
+    error_done = threading.Event()
+    worker.pairing_finished.connect(pairing_finished.append, type=DIRECT)
+    worker.error.connect(lambda text: (errors.append(text), error_done.set()), type=DIRECT)
+    worker.start()
+    try:
+        assert worker.connect_device(UNPAIRED_DEVICE) is True
+        assert error_done.wait(3)
+        # 后端抛异常也要收尾：否则界面会一直停在「配对中」。
+        assert pairing_finished == ["配对失败"]
+        assert "配对模式" in errors[-1]
+        assert [call[0] for call in backend.calls] == ["pair"]
+        assert worker.is_connected() is False
+    finally:
+        worker.shutdown()
+
+
+def test_disconnect_while_connecting_cancels_connection(qapp):
+    backend = FakeSppBackend()
+    backend.connect_delay = 0.3
+    worker = SppWorker(backend)
+    connected: list[tuple[str, str]] = []
+    worker.connected.connect(
+        lambda channel, name: connected.append((channel, name)), type=DIRECT
+    )
+    worker.start()
+    try:
+        assert worker.connect_device(PAIRED_DEVICE) is True
+        assert worker.disconnect_device("连接中取消") is True
+        # 连接协程跑完后必须自己把 socket 关掉，并且一次 connected 都不发。
+        assert backend.closed_event.wait(3)
+        assert connected == []
+        assert worker.is_connected() is False
+        assert worker.channel() == ""
+    finally:
+        worker.shutdown()
+
+
+def test_pairing_budget_includes_prompt_time(monkeypatch, qapp):
+    monkeypatch.setattr(spp_worker, "PAIR_TIMEOUT", 0.1)
+    monkeypatch.setattr(SppWorker, "PROMPT_TIMEOUT", 0.5)
+    backend = FakeSppBackend()
+    # 比 PAIR_TIMEOUT 长，但没超过 PAIR_TIMEOUT + PROMPT_TIMEOUT：
+    # 预算只算握手时间的话这里会被判成配对超时。
+    backend.pair_delay = 0.3
+    worker = SppWorker(backend)
+    connected = threading.Event()
+    errors: list[str] = []
+    worker.connected.connect(lambda channel, name: connected.set(), type=DIRECT)
+    worker.error.connect(errors.append, type=DIRECT)
+    worker.start()
+    try:
+        assert worker.connect_device(UNPAIRED_DEVICE) is True
+        assert connected.wait(3)
+        assert errors == []
     finally:
         worker.shutdown()
