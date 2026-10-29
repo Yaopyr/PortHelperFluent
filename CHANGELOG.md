@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
-## [Unreleased]
+## [1.1.0] - 2026-10-29
 
 新增「蓝牙调试」页面：同时覆盖 BLE 与经典蓝牙 SPP，一页完成扫描、配对、收发。
 
@@ -16,7 +16,11 @@
 - 蓝牙不可用/失败时给出中文原因与下一步建议，并提供「打开蓝牙设置」按钮（`ms-settings:bluetooth`）。
 - 新增配置键：`bluetooth.mode`、`bluetooth.last_device`、`bluetooth.last_device_name`、`bluetooth.auto_connect`、`bluetooth.favorites`、`bluetooth.aliases`、`bluetooth.hex_send`、`bluetooth.hex_display`、`bluetooth.spp_baud`、`bluetooth.spp_com`、`bluetooth.write_with_response`、`bluetooth.mtu_chunk`、`bluetooth.ignore_empty_notify`。
 - 新增依赖 `bleak==3.0.2`、`winrt-Windows.Devices.Bluetooth.Rfcomm==3.2.1`、`winrt-Windows.Networking==3.2.1`、`winrt-Windows.Networking.Sockets==3.2.1`；PyInstaller 用 `collect_submodules` 收集 bleak 与 `winrt`，`--selftest` 与构建脚本断言三项模块可导入。
-- 748 项 pytest 测试；蓝牙服务纯函数、BLE/SPP worker（注入假 scanner/client/配对器/socket，起真线程）与页面（假 worker 发信号）全部覆盖，不需要真机或蓝牙适配器。
+- 755 项 pytest 测试；蓝牙服务纯函数、BLE/SPP worker（注入假 scanner/client/配对器/socket，起真线程）与页面（假 worker 发信号）全部覆盖，不需要真机或蓝牙适配器。
+
+### Changed
+
+- 版本号升至 1.1.0（`app/__init__.py` 与 `build/version_info.txt` 同步）。
 
 ### Known Limitations
 

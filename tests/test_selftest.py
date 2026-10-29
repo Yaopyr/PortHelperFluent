@@ -66,7 +66,7 @@ def test_selftest_cli_writes_ok_report(tmp_path: Path) -> None:
     assert payload["python"] == sys.version.split()[0]
     assert payload["qt"]
     assert payload["qfluentwidgets"] == version("PyQt6-Fluent-Widgets")
-    assert payload["version"] == "1.0.1"
+    assert payload["version"] == "1.1.0"
     assert set(payload) == {
         "ok",
         "errors",
@@ -288,7 +288,7 @@ def test_create_main_window_builds_real_fluent_window(qapp, tmp_path: Path) -> N
     window = main.create_main_window(settings, paths)
 
     assert isinstance(window, FluentWindow)
-    assert window.windowTitle() == "PortHelper Fluent 1.0.1"
+    assert window.windowTitle() == "PortHelper Fluent 1.1.0"
     assert window.smoke_test() is True
     window.close()
 
