@@ -308,7 +308,9 @@ class SettingsPage(QWidget):
         grid.addWidget(BodyLabel("启动时检查", card), 1, 0)
         self.auto_check_switch = SwitchButton(card)
         self.auto_check_switch.setText("发现新版本时提示")
-        self.auto_check_switch.setToolTip("启动后在后台静默检查一次；关闭后不再发起任何更新请求")
+        self.auto_check_switch.setToolTip(
+            "启动后在后台静默检查一次；关闭后启动时不再检查，手动检查仍可用"
+        )
         self.auto_check_switch.checkedChanged.connect(self._on_auto_check_changed)
         grid.addWidget(self.auto_check_switch, 1, 1)
 
