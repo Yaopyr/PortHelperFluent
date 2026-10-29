@@ -10,7 +10,7 @@
 4. **单文件交付**：PyInstaller onefile，不安装服务/驱动，不写注册表，不需要管理员权限。
 5. **失败可读**：所有用户可见错误使用中文「发生了什么 + 可能原因 + 下一步」，技术细节写日志。
 
-非目标：系统级串口驱动监视、厂商 DLL（CH372）、蓝牙助手、增量/签名更新。
+非目标：系统级串口驱动监视、厂商 DLL（CH372）、蓝牙调试以外的蓝牙助手功能（音频、文件传输等）、增量/签名更新。
 
 ## 分层
 
@@ -66,7 +66,7 @@ flowchart TB
 | `hid_worker.py` | `HidBackend` 协议、hidapi 适配、`HidWorker(QThread)`、设备枚举 |
 | `net_client.py` | `NetClientController(QObject)`，TCP/UDP、异步域名、状态/错误信号 |
 | `net_server.py` | `NetServerController(QObject)`，监听、多客户端、广播、计数 |
-| `async_worker.py` | daemon 线程 + 私有 asyncio loop 的通用外壳：线程安全命令投递、信号回传、`stop()` 有限等待 |
+| `async_worker.py` | daemon 线程 + 私有 asyncio loop 的通用外壳：线程安全命令投递、信号回传、`shutdown()` 有限等待 |
 | `ble_worker.py` | `BleWorker(QObject)`，封装 `BleakScanner`/`BleakClient`：扫描、连接、服务、读/写、通知、MTU、断开 |
 | `spp_worker.py` | `SppWorker(QObject)`，封装 WinRT 设备枚举/配对/RFCOMM socket；COM 通道在内部持有 `SerialWorker` |
 | `update_worker.py` | daemon 线程 + QObject 信号的检查/下载任务（不阻塞界面、退出不阻塞进程） |
@@ -160,7 +160,7 @@ sequenceDiagram
 - 所有 bleak 与 WinRT 调用都只在 worker 线程的私有 asyncio loop 里执行；界面线程只用 `loop.call_soon_threadsafe` 下发指令，结果一律通过 Qt 信号回传，界面不会因为扫描/配对/连接卡住。
 - worker 不持有父对象（`parent=None`）由页面保活，`finished` 后清空引用；`stop_workers()` / `closeEvent` 会取消任务 → 关闭客户端或 socket → 停 loop → `join(≤3 s)`，重复调用安全。
 - 页面构造期间**零**蓝牙调用：worker 在首次扫描/连接时才创建，因此路由与布局测试不会触发任何扫描。
-- 同一时间只有一条活动连接。切换 BLE/SPP 模式或切换设备前先断开当前链路，并在日志插入系统分隔线说明断开原因；主动断开与异常断开都收敛成同一个 `disconnected(reason)` 信号，避免界面出现两种状态。
+- 同一时间只有一条活动连接。切换 BLE/SPP 模式或切换设备前先断开当前链路，并在日志插入系统分隔线说明断开原因；主动断开与异常断开（对端断开、设备消失、读取循环异常退出）都收敛成同一个 `disconnected(reason)` 信号，避免界面出现两种状态。连接在飞时点「断开」会挂取消标志，迟到建立的链路被立即拆掉且不发 `connected`，不会在断开后又复活一条连接。
 - SPP 的 COM 备用通道复用 `SerialWorker`（`QThread`），由 `SppWorker` 把它的信号收敛进同一套信号；RFCOMM 与 COM 通道互斥。
 - 连接后 MTU 只读（Windows 系统协商，可刷新重读）；RSSI 只在扫描期间发出，连接后设备一般停止广播，界面标注停更。
 

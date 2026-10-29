@@ -49,6 +49,9 @@ REQUIRED_MODULES = (
     "qrcode",
     "bleak",
     "winrt.windows.devices.bluetooth.rfcomm",
+    "winrt.windows.devices.enumeration",
+    "winrt.windows.devices.bluetooth",
+    "winrt.windows.storage.streams",
     "winrt.windows.networking.sockets",
 )
 

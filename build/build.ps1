@@ -75,7 +75,7 @@ function Assert-SelftestReport {
         $details = ($payload.errors -join '; ')
         throw "$Label reported ok=false: $details"
     }
-    foreach ($moduleName in @('PyQt6', 'qfluentwidgets', 'serial', 'psutil', 'PIL', 'numpy', 'hid', 'qrcode', 'bleak', 'winrt.windows.devices.bluetooth.rfcomm', 'winrt.windows.networking.sockets')) {
+    foreach ($moduleName in @('PyQt6', 'qfluentwidgets', 'serial', 'psutil', 'PIL', 'numpy', 'hid', 'qrcode', 'bleak', 'winrt.windows.devices.bluetooth.rfcomm', 'winrt.windows.devices.enumeration', 'winrt.windows.devices.bluetooth', 'winrt.windows.storage.streams', 'winrt.windows.networking.sockets')) {
         if ($payload.resources.modules.$moduleName -ne $true) {
             throw "$Label reports module not available: $moduleName"
         }
