@@ -147,7 +147,7 @@ Expected: `ModuleNotFoundError: No module named 'app.services.bluetooth'`
 
 模块 docstring 写明「无 Qt、无蓝牙 I/O 的纯函数」；常量与函数只按上面的签名实现。`KNOWN_SERVICES` 至少含 `1800 通用访问`、`1801 通用属性`、`180a 设备信息`、`180f 电池服务`、`180d 心率服务`、`1812 HID`、`ffe0 自定义透传`、`fff0 自定义透传`；`KNOWN_CHARACTERISTICS` 至少含 `2a00 设备名称`、`2a19 电量`、`2a29 制造商`、`ffe1 FFE0 数据`、`fff1 FFF0 数据`、`fff2 FFF0 数据`。
 
-实现要点（签名与测试之外只剩这些选择）：`sort_devices` 先按 `address in favorites` 分桶再按模式排序，"rssi" 用 `-(rssi or -999)`（`None` 排最后）、"name" 用 `name.casefold()`、未知模式等同 "rssi"；`explain_error` 用 `{"scan": "确认设备在广播范围内，且系统蓝牙已打开", "connect": "确认设备未被其他程序占用，且已开机", "pair": "先让设备进入配对模式（指示灯快闪）", "write": "确认该特征值支持写入"}` 拼接 `f"{message}（{hint}）"`，`message` 为空时只返回 hint。
+实现要点（签名与测试之外只剩这些选择）：`sort_devices` 先按 `address in favorites` 分桶再按模式排序，"rssi" 用 `-(rssi or -999)`（`None` 排最后）、"name" 用 `(未命名垫底, name.casefold())`、未知模式等同 "recent"（稳定保持入参顺序）——以上以 Step 1 的测试断言为准（2026-10-29 裁决）；`explain_error` 用 `{"scan": "确认设备在广播范围内，且系统蓝牙已打开", "connect": "确认设备未被其他程序占用，且已开机", "pair": "先让设备进入配对模式（指示灯快闪）", "write": "确认该特征值支持写入"}` 拼接 `f"{message}（{hint}）"`，`message` 为空时只返回 hint。
 
 - [ ] **Step 4: 跑测试确认通过**
 
