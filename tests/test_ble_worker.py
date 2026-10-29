@@ -35,6 +35,7 @@ class FakeBleBackend:
         ]
         self.mtu_value = 23
         self.read_value = b"\x01\x02"
+        self.connect_delay = 0.0
         self.fail_on: str | None = None
         self.disconnect_cb = None
         self.notify_cb = None
@@ -55,6 +56,8 @@ class FakeBleBackend:
 
     async def connect(self, address) -> None:
         self.calls.append(("connect", address))
+        if self.connect_delay:
+            await asyncio.sleep(self.connect_delay)
         if self.fail_on == "connect":
             raise RuntimeError("连接失败")
 
@@ -123,6 +126,7 @@ def test_connect_emits_connected_mtu_and_services(qapp):
     connected: list[tuple[str, int]] = []
     mtus: list[int] = []
     done = threading.Event()
+    mtu_done = threading.Event()
 
     def on_services(value):
         services.append(value)
@@ -135,11 +139,15 @@ def test_connect_emits_connected_mtu_and_services(qapp):
 
     worker.services_ready.connect(on_services, type=DIRECT)
     worker.connected.connect(on_connected, type=DIRECT)
-    worker.mtu_changed.connect(mtus.append, type=DIRECT)
+    worker.mtu_changed.connect(
+        lambda value: (mtus.append(value), mtu_done.set()), type=DIRECT
+    )
     worker.start()
     try:
         assert worker.connect_device("AA:BB:CC:DD:EE:FF") is True
         assert done.wait(3)
+        # mtu_changed 在 connected 之后发，必须单独等它再断言。
+        assert mtu_done.wait(3)
         assert connected == [("AA:BB:CC:DD:EE:FF", 23)]
         assert services == [backend.service_list]
         assert order[:2] == ["services", "connected"]
@@ -281,5 +289,90 @@ def test_refresh_mtu_emits_new_value(qapp):
         assert worker.refresh_mtu() is True
         assert mtus_done.wait(3)
         assert mtus == [247]
+    finally:
+        worker.shutdown()
+
+
+def test_second_scan_while_scanning_is_rejected(qapp):
+    backend = FakeBleBackend()
+    worker = BleWorker(backend)
+    started: list[int] = []
+    done = threading.Event()
+    worker.scan_started.connect(started.append, type=DIRECT)
+    worker.scan_finished.connect(done.set, type=DIRECT)
+    worker.start()
+    try:
+        assert worker.start_scan(1) is True
+        assert worker.start_scan(1) is False
+        assert started == [1]
+        assert done.wait(3)
+        assert [call for call in backend.calls if call[0] == "scan"] == [("scan", 1)]
+        assert worker.is_scanning() is False
+    finally:
+        worker.shutdown()
+
+
+def test_second_connect_while_connecting_is_rejected(qapp):
+    backend = FakeBleBackend()
+    backend.connect_delay = 0.3
+    worker = BleWorker(backend)
+    connected: list[tuple[str, int]] = []
+    done = threading.Event()
+    worker.connected.connect(
+        lambda address, mtu: (connected.append((address, mtu)), done.set()), type=DIRECT
+    )
+    worker.start()
+    try:
+        assert worker.connect_device("AA:BB:CC:DD:EE:FF") is True
+        assert worker.connect_device("AA:BB:CC:DD:EE:FF") is False
+        assert done.wait(3)
+        assert connected == [("AA:BB:CC:DD:EE:FF", 23)]
+        assert [call for call in backend.calls if call[0] == "connect"] == [
+            ("connect", "AA:BB:CC:DD:EE:FF")
+        ]
+        assert worker.connect_device("AA:BB:CC:DD:EE:FF") is False
+    finally:
+        worker.shutdown()
+
+
+def test_scan_failure_resets_state_and_emits_finished(qapp):
+    backend = FakeBleBackend()
+    backend.fail_on = "scan"
+    worker = BleWorker(backend)
+    errors: list[str] = []
+    finished: list[bool] = []
+    error_done = threading.Event()
+    worker.error.connect(lambda text: (errors.append(text), error_done.set()), type=DIRECT)
+    worker.scan_finished.connect(lambda: finished.append(True), type=DIRECT)
+    worker.start()
+    try:
+        assert worker.start_scan(1) is True
+        # scan_finished 在协程的 finally 里先发，error 随后由 _guard 发，所以等 error。
+        assert error_done.wait(3)
+        assert errors and "蓝牙关闭" in errors[0]
+        assert "广播范围" in errors[0]
+        assert finished == [True]
+        assert worker.is_scanning() is False
+
+        backend.fail_on = None
+        assert worker.start_scan(1) is True
+        assert worker.stop_scan() is True
+    finally:
+        worker.shutdown()
+
+
+def test_read_error_uses_read_hint(qapp):
+    backend = FakeBleBackend()
+    backend.fail_on = "read"
+    worker = BleWorker(backend)
+    errors: list[str] = []
+    error_done = threading.Event()
+    worker.error.connect(lambda text: (errors.append(text), error_done.set()), type=DIRECT)
+    worker.start()
+    try:
+        assert worker.read_char(CHAR_UUID) is True
+        assert error_done.wait(3)
+        assert errors and "读取失败" in errors[0]
+        assert "确认该特征值支持读取" in errors[0]
     finally:
         worker.shutdown()

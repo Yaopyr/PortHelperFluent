@@ -29,6 +29,14 @@ CONNECT_TIMEOUT = 30.0
 NOT_RUNNING_MESSAGE = "蓝牙后台线程未运行，请重新扫描"
 PEER_DISCONNECT_MESSAGE = "设备主动断开连接"
 NOT_CONNECTED_MESSAGE = "蓝牙未连接"
+STAGE_LABELS: dict[str, str] = {
+    "scan": "扫描",
+    "connect": "连接",
+    "read": "读取",
+    "write": "写入",
+    "notify": "订阅",
+    "mtu": "MTU",
+}
 
 
 @dataclass(frozen=True)
@@ -203,6 +211,7 @@ class BleWorker(AsyncLoopWorker):
         self._scanning = False
         self._scan_stop = threading.Event()
         self._connected = False
+        self._connecting = False
         self._self_disconnect = threading.Event()
 
     def _on_backend_disconnect(self, reason: str) -> None:
@@ -215,6 +224,9 @@ class BleWorker(AsyncLoopWorker):
     # ---- 扫描 ---------------------------------------------------------
 
     def start_scan(self, duration: float = 10.0) -> bool:
+        if self._scanning:
+            # 已有扫描在跑：再投一个会让先结束的那个把 _scanning 复位，停止按钮失效。
+            return False
         seconds = max(0, int(duration))
         self._scan_stop.clear()
         self._scanning = True
@@ -245,7 +257,14 @@ class BleWorker(AsyncLoopWorker):
     # ---- 连接 ---------------------------------------------------------
 
     def connect_device(self, address: str) -> bool:
-        return self._submit_or_report(lambda: self._connect_coroutine(address))
+        if self._connecting or self._connected:
+            # 连接在飞或已连着：再连会覆盖 backend 里的 client，留下一条泄漏连接。
+            return False
+        self._connecting = True
+        if not self._submit_or_report(lambda: self._connect_coroutine(address)):
+            self._connecting = False
+            return False
+        return True
 
     def disconnect_device(self, reason: str = "用户断开") -> bool:
         return self._submit_or_report(lambda: self._disconnect_coroutine(reason))
@@ -253,13 +272,16 @@ class BleWorker(AsyncLoopWorker):
     async def _connect_coroutine(self, address: str) -> None:
         self._stage = "connect"
         try:
-            await asyncio.wait_for(self._backend.connect(address), CONNECT_TIMEOUT)
-        except TimeoutError:
-            self.error.emit(explain_error("connect", "连接超时"))
-            return
-        services = await self._backend.services()
-        mtu = int(self._backend.mtu())
-        self._connected = True
+            try:
+                await asyncio.wait_for(self._backend.connect(address), CONNECT_TIMEOUT)
+                services = await self._backend.services()
+                mtu = int(self._backend.mtu())
+            except TimeoutError:
+                self.error.emit(explain_error("connect", "连接超时"))
+                return
+            self._connected = True
+        finally:
+            self._connecting = False
         self.services_ready.emit(services)
         self.connected.emit(address, mtu)
         self.mtu_changed.emit(mtu)
@@ -333,4 +355,8 @@ class BleWorker(AsyncLoopWorker):
         return False
 
     def _describe_error(self, exc: BaseException) -> str:
-        return explain_error(self._stage, str(exc))
+        text = explain_error(self._stage, str(exc))
+        if text:
+            return text
+        # 阶段无提示且异常消息为空时也要给出中文文案，不能把空串发给界面。
+        return f"{STAGE_LABELS.get(self._stage, '蓝牙')}操作失败"

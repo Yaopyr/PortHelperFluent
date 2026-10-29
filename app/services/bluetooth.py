@@ -49,7 +49,10 @@ _ERROR_HINTS: dict[str, str] = {
     "scan": "确认设备在广播范围内，且系统蓝牙已打开",
     "connect": "确认设备未被其他程序占用，且已开机",
     "pair": "先让设备进入配对模式（指示灯快闪）",
+    "read": "确认该特征值支持读取",
     "write": "确认该特征值支持写入",
+    "notify": "确认该特征值支持通知或指示",
+    "mtu": "MTU 由系统协商，可尝试断开重连",
 }
 
 _PAIR_STATUS: dict[str, str] = {

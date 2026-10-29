@@ -98,6 +98,13 @@ def test_pair_status_text_and_explain_error_are_chinese():
     assert explain_error("connect", "连接失败") == "连接失败（确认设备未被其他程序占用，且已开机）"
 
 
+def test_explain_error_has_actionable_hints_for_read_notify_and_mtu():
+    assert "支持读取" in explain_error("read", "x")
+    assert "通知或指示" in explain_error("notify", "x")
+    assert "断开重连" in explain_error("mtu", "x")
+    assert "支持读取" in explain_error("read", "")
+
+
 def test_address_from_device_id_extracts_mac():
     assert address_from_device_id("Bluetooth#Bluetooth00:1A:7D:DA:71:13-4c:5e:0c:11:22:33") == "00:1A:7D:DA:71:13"
     assert address_from_device_id("no-mac-here") == "no-mac-here"
