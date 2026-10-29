@@ -186,7 +186,9 @@ class BluetoothPage(QWidget):
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         title_box.addWidget(TitleLabel("蓝牙调试", self))
-        title_box.addWidget(CaptionLabel("BLE 与经典蓝牙 SPP 共用日志与发送区", self))
+        title_box.addWidget(
+            CaptionLabel("低功耗蓝牙与经典蓝牙串口，一页完成扫描、配对、收发", self)
+        )
         header.addLayout(title_box)
         header.addStretch(1)
         self.status_chip = StatusChip(self)
@@ -272,7 +274,9 @@ class BluetoothPage(QWidget):
         scan_layout.addLayout(filter_row)
         layout.addWidget(scan_card)
 
-        device_card, device_layout = section_card("设备", "收藏置顶；右键可收藏、重命名或复制地址")
+        device_card, device_layout = section_card(
+            "设备", "收藏置顶；右键可连接、收藏、重命名或复制地址"
+        )
         self.device_table = TableWidget(device_card)
         self.device_table.setColumnCount(len(DEVICE_COLUMNS))
         self.device_table.setHorizontalHeaderLabels(DEVICE_COLUMNS)
@@ -304,7 +308,12 @@ class BluetoothPage(QWidget):
         device_layout.addLayout(connect_row)
         layout.addWidget(device_card)
 
-        info_card, info_layout = section_card("设备信息", "MTU 由系统协商，只读；刷新不会重新连接")
+        info_card, info_layout = section_card(
+            "设备信息", "MTU 由系统协商，只读；刷新不会重新连接"
+        )
+        self.device_summary_label = BodyLabel("名称：— · 地址：— · 服务数：0", info_card)
+        self.device_summary_label.setWordWrap(True)
+        info_layout.addWidget(self.device_summary_label)
         mtu_row = QHBoxLayout()
         mtu_row.setSpacing(8)
         self.mtu_label = StrongBodyLabel("当前 MTU：未知", info_card)
@@ -347,6 +356,8 @@ class BluetoothPage(QWidget):
         self.service_tree.setHeaderHidden(True)
         self.service_tree.setMinimumHeight(180)
         self.service_tree.itemSelectionChanged.connect(self._on_char_selection_changed)
+        self.service_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.service_tree.customContextMenuRequested.connect(self._show_service_menu)
         service_layout.addWidget(self.service_tree)
         layout.addWidget(service_card)
 
@@ -695,6 +706,9 @@ class BluetoothPage(QWidget):
             worker = self._spp_worker
             self._spp_connected = False
             self._spp_connecting = False
+        if self._file_handle is not None:
+            # 断开后文件再发不出去：一并取消，别让句柄把 has_active_work() 拖成常真。
+            self._cancel_file_send()
         # 先记下主动断开的原因，worker 同步回 `disconnected` 时不再重复记一条日志。
         self._self_disconnect_reason = reason
         if worker is not None:
@@ -930,17 +944,29 @@ class BluetoothPage(QWidget):
             return
         address = str(device.get("address") or "")
         menu = QMenu(self)
+        connect_action = menu.addAction("连接")
         favorite_action = menu.addAction("取消收藏" if self._is_favorite(address) else "收藏置顶")
         rename_action = menu.addAction("重命名…")
         copy_action = menu.addAction("复制地址")
         chosen = menu.exec(self.device_table.viewport().mapToGlobal(position))
-        if chosen is favorite_action:
+        if chosen is connect_action:
+            self._connect_device(address)
+        elif chosen is favorite_action:
             self._toggle_favorite(address)
         elif chosen is rename_action:
             self._rename_device(address)
         elif chosen is copy_action:
             QApplication.clipboard().setText(address)
             show_success(self, "已复制地址", address)
+
+    def _connect_device(self, address: str) -> None:
+        """菜单「连接」：已连到同一设备就断开，否则选中它并发起连接。"""
+        if self._ble_connected and address == self._ble_address:
+            self._disconnect_mode(MODE_BLE, "已断开 BLE：用户断开")
+            self._refresh_status_text()
+            return
+        self._sync_ble_selection(address)
+        self._start_ble_connect(address)
 
     def _toggle_favorite(self, address: str) -> None:
         if not address:
@@ -1041,6 +1067,9 @@ class BluetoothPage(QWidget):
         self._ble_connecting = False
         self._mtu = 0
         self._subscribed.clear()
+        if self._file_handle is not None:
+            # 连接没了文件发不完，直接取消，别让句柄一直挂着。
+            self._cancel_file_send()
         self._refresh_connection_state()
         if reason and reason != self._self_disconnect_reason:
             self.status_chip.set_state("idle", f"已断开：{reason}")
@@ -1106,6 +1135,7 @@ class BluetoothPage(QWidget):
         self._selected_char = None
         self._subscribed.clear()
         self._render_service_tree()
+        self._update_device_summary()
 
     def _render_service_tree(self) -> None:
         selected_uuid = self._selected_char.uuid if self._selected_char else ""
@@ -1221,6 +1251,24 @@ class BluetoothPage(QWidget):
             return
         QApplication.clipboard().setText(char.uuid)
         show_success(self, "已复制 UUID", char.uuid)
+
+    @safe_slot
+    def _show_service_menu(self, position) -> None:
+        """服务树右键：服务节点复制服务 UUID，特征值节点复制特征值 UUID。"""
+        item = self.service_tree.itemAt(position) or self.service_tree.currentItem()
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if isinstance(data, BleServiceInfo):
+            label = "复制服务 UUID"
+        elif isinstance(data, BleCharInfo):
+            label = "复制特征值 UUID"
+        else:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction(label)
+        chosen = menu.exec(self.service_tree.viewport().mapToGlobal(position))
+        if chosen is copy_action:
+            QApplication.clipboard().setText(data.uuid)
+            show_success(self, "已复制 UUID", data.uuid)
 
     @safe_slot
     def _expand_services(self) -> None:
@@ -1424,6 +1472,9 @@ class BluetoothPage(QWidget):
         self._spp_connecting = False
         self._spp_channel = ""
         self.pair_stage_label.setText("尚未连接")
+        if self._file_handle is not None:
+            # 连接没了文件发不完，直接取消，别让句柄一直挂着。
+            self._cancel_file_send()
         self._refresh_connection_state()
         if reason and reason != self._self_disconnect_reason:
             self.status_chip.set_state("idle", f"已断开：{reason}")
@@ -1506,9 +1557,22 @@ class BluetoothPage(QWidget):
         self.spp_connect_button.setEnabled(spp_active or self._selected_spp_device() is not None)
         self.com_connect_button.setText("关闭 COM 口" if spp_active else "打开 COM 口")
         self.mtu_refresh_button.setEnabled(self._ble_connected)
+        self._update_device_summary()
         self._update_mtu_label()
         self._update_spp_info()
         self._refresh_char_actions()
+
+    def _update_device_summary(self) -> None:
+        if not (self._ble_connected or self._ble_connecting) or not self._ble_address:
+            self.device_summary_label.setText("名称：— · 地址：— · 服务数：0")
+            return
+        address = self._ble_address
+        device = self._ble_devices.get(address) or {}
+        name = self._display_name(address, device.get("name") or self._ble_name)
+        count = len(self._ble_services) if self._ble_connected else 0
+        self.device_summary_label.setText(
+            f"名称：{name} · 地址：{address} · 服务数：{count}"
+        )
 
     def _update_mtu_label(self) -> None:
         if self._mtu > 0:
@@ -1647,10 +1711,17 @@ class BluetoothPage(QWidget):
 
     @safe_slot
     def _on_repeat_toggled(self, checked: bool) -> None:
-        if checked and self._can_send():
-            self._start_repeat()
-        elif not checked:
+        if not checked:
             self._stop_repeat()
+            return
+        if not self._can_send():
+            # 没有写入目标时勾上也发不出去：复位勾选并说明原因，避免静默无效。
+            self._stop_repeat()
+            show_warning(
+                self, "无法连续发送", "先连接设备并选中可写特征值，或连上经典蓝牙后再开启。"
+            )
+            return
+        self._start_repeat()
 
     def _start_repeat(self) -> None:
         self._repeat_timer.start(max(10, self.interval_spin.value()))
@@ -1717,15 +1788,16 @@ class BluetoothPage(QWidget):
         self._refresh_send_state()
         self._pump_file_send()
 
-    def _read_file_piece(self) -> bytes:
+    def _read_file_piece(self) -> bytes | None:
+        """读一块文件；读失败返回 None，不能当成「文件结束」处理。"""
         if self._file_handle is None:
             return b""
         size = FILE_CHUNK_BLE if self._mode == MODE_BLE else FILE_CHUNK_SPP
         try:
             return self._file_handle.read(size)
         except OSError as exc:
-            show_error(self, "读取文件失败", str(exc))
-            return b""
+            show_error(self, "读取文件失败", f"{self._file_name}\n{exc}")
+            return None
 
     def _file_piece_chunks(self, piece: bytes) -> list[bytes]:
         if self._mode == MODE_BLE and self.mtu_chunk_switch.isChecked():
@@ -1733,10 +1805,12 @@ class BluetoothPage(QWidget):
         # SPP 走 RFCOMM/COM 时按 4096 B 整段写，由 worker 负责切分。
         return [piece]
 
-    def _next_file_chunk(self) -> bytes:
+    def _next_file_chunk(self) -> bytes | None:
         if self._file_queue:
             return self._file_queue.pop(0)
         piece = self._read_file_piece()
+        if piece is None:
+            return None
         if not piece:
             return b""
         chunks = self._file_piece_chunks(piece)
@@ -1751,6 +1825,10 @@ class BluetoothPage(QWidget):
         try:
             while self._file_handle is not None and not self._file_awaiting_ack:
                 chunk = self._next_file_chunk()
+                if chunk is None:
+                    # 读文件失败：只报错并取消，绝不弹「发送完成」。
+                    self._cancel_file_send()
+                    return
                 if not chunk:
                     self._finish_file_send()
                     return
@@ -1843,7 +1921,10 @@ class BluetoothPage(QWidget):
         self._spp_connected = False
         self._spp_connecting = False
         self._scanning = False
+        self._scan_remaining = 0
         self._scan_timer.stop()
+        self.scan_button.setText("开始扫描")
+        self.scan_remain_label.setText("")
 
     def closeEvent(self, event) -> None:
         self._save_settings()

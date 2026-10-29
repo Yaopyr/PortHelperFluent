@@ -7,8 +7,12 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
-from PyQt6.QtCore import QCoreApplication, QEvent, QObject, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QEvent, QObject, QPoint, pyqtSignal
+from PyQt6.QtWidgets import QApplication
+from qfluentwidgets import CaptionLabel
 
 from app.core.settings import Settings
 from app.io.ble_worker import BleCharInfo, BleDeviceInfo, BleServiceInfo
@@ -305,6 +309,29 @@ def _log_text(widget: BluetoothPage) -> str:
     return widget.log_pane.log_view.toPlainText()
 
 
+def _menu_returning(label: str):
+    """`QMenu` 替身：`addAction` 只记录，`exec` 固定返回 `label` 对应的那一项。"""
+
+    class _Action:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class _Menu:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+            self.actions: dict[str, _Action] = {}
+
+        def addAction(self, text: str) -> _Action:
+            action = _Action(text)
+            self.actions[text] = action
+            return action
+
+        def exec(self, _position=None) -> _Action | None:
+            return self.actions.get(label)
+
+    return _Menu
+
+
 def test_mode_switch_disconnects_current_connection(page):
     widget, _settings, ble, _spp = page
     _warm_ble(widget, ble)
@@ -571,3 +598,161 @@ def test_spp_one_click_connect_and_com_fallback(page):
     widget.com_connect_button.click()
     assert ("open_com", "COM9", 9600) in spp.calls
     assert settings.get("bluetooth.spp_com") == "COM9"
+
+
+def test_header_caption_matches_brief(page):
+    widget, _settings, _ble, _spp = page
+    captions = [label.text() for label in widget.findChildren(CaptionLabel)]
+    assert any("一页完成扫描、配对、收发" in text for text in captions)
+
+
+def test_info_card_shows_name_address_and_service_count(page):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.device_found.emit(BleDeviceInfo("设备甲", ADDRESS, -60, 1.0))
+    ble.emit_connected()
+
+    summary = widget.device_summary_label.text()
+    assert "设备甲" in summary
+    assert ADDRESS in summary
+    assert "服务数：1" in summary
+
+    ble.emit_disconnected()
+    assert "服务数：0" in widget.device_summary_label.text()
+
+
+def test_device_menu_connect_starts_connection(page, monkeypatch):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.device_found.emit(BleDeviceInfo("设备甲", ADDRESS, -60, 1.0))
+    widget.device_table.selectRow(0)
+
+    monkeypatch.setattr(bluetooth_page_module, "QMenu", _menu_returning("连接"))
+    widget._show_device_menu(QPoint(0, 0))
+
+    assert ("connect_device", ADDRESS) in ble.calls
+    assert widget.connect_button.text() == "断开"
+
+
+def test_service_tree_menu_copies_service_uuid(page, monkeypatch):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.emit_connected()
+    QApplication.clipboard().clear()
+
+    service_node = widget.service_tree.topLevelItem(0)
+    widget.service_tree.setCurrentItem(service_node)
+    monkeypatch.setattr(bluetooth_page_module, "QMenu", _menu_returning("复制服务 UUID"))
+    # 空白处右键：位置没命中节点时回退到当前节点。
+    widget._show_service_menu(QPoint(5000, 5000))
+    assert QApplication.clipboard().text() == SERVICE_UUID
+
+    widget.service_tree.setCurrentItem(_tree_item(widget.service_tree, "FFE1"))
+    monkeypatch.setattr(
+        bluetooth_page_module, "QMenu", _menu_returning("复制特征值 UUID")
+    )
+    widget._show_service_menu(QPoint(5000, 5000))
+    assert QApplication.clipboard().text() == WRITE_UUID
+
+
+def test_file_read_failure_does_not_report_success(page, tmp_path, monkeypatch):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.emit_connected()
+    widget.service_tree.setCurrentItem(_tree_item(widget.service_tree, "FFE1"))
+
+    path = tmp_path / "payload.bin"
+    path.write_bytes(bytes(range(60)))
+    real_open = io.open
+
+    class _BrokenHandle:
+        def __init__(self, handle) -> None:
+            self._handle = handle
+            self.name = handle.name
+
+        def read(self, _size: int = -1):
+            raise OSError("模拟读取失败")
+
+        def close(self) -> None:
+            self._handle.close()
+
+    def fake_open(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        return _BrokenHandle(handle) if mode == "rb" else handle
+
+    monkeypatch.setattr(io, "open", fake_open)
+    monkeypatch.setattr(
+        bluetooth_page_module.QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *args, **kwargs: (str(path), "")),
+    )
+
+    widget.send_file_button.click()
+
+    assert widget._file_handle is None
+    assert widget._file_awaiting_ack is False
+    assert "文件发送完成" not in widget.file_progress_label.text()
+    assert "已取消" in widget.file_progress_label.text()
+    assert widget.send_button.isEnabled() is True
+
+
+def test_disconnect_cancels_file_send(page, tmp_path, monkeypatch):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.emit_connected()
+    widget.service_tree.setCurrentItem(_tree_item(widget.service_tree, "FFE1"))
+
+    path = tmp_path / "payload.bin"
+    path.write_bytes(bytes(range(60)))
+    monkeypatch.setattr(
+        bluetooth_page_module.QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *args, **kwargs: (str(path), "")),
+    )
+
+    ble.ack_writes = False  # 不回写回执，文件一直停在「发送中」。
+    widget.send_file_button.click()
+    assert widget._file_handle is not None
+    assert widget.has_active_work() is True
+
+    # 点「断开」（连接在飞时走的是同一条 _disconnect_mode 路径）要连文件发送一起停。
+    widget.connect_button.click()
+    assert widget._file_handle is None
+    assert widget.has_active_work() is False
+
+    # 设备自己断开也一样。
+    ble.ack_writes = True
+    ble.emit_connected()
+    widget.service_tree.setCurrentItem(_tree_item(widget.service_tree, "FFE1"))
+    ble.ack_writes = False
+    widget.send_file_button.click()
+    assert widget._file_handle is not None
+
+    ble.emit_disconnected("设备主动断开连接")
+    assert widget._file_handle is None
+    assert widget.has_active_work() is False
+
+
+def test_stop_workers_resets_scan_state(page):
+    widget, _settings, ble, _spp = page
+    ble.auto_finish_scan = False
+    widget.scan_button.click()
+    assert widget.scan_button.text() == "停止扫描"
+    assert "剩余" in widget.scan_remain_label.text()
+
+    widget.stop_workers()
+
+    assert widget.scan_button.text() == "开始扫描"
+    assert widget.scan_remain_label.text() == ""
+    assert widget.has_active_work() is False
+
+
+def test_repeat_toggle_without_target_stays_off(page):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.emit_connected()  # 已连接但还没选可写特征值。
+
+    widget.repeat_check.setChecked(True)
+
+    assert widget.repeat_check.isChecked() is False
+    assert widget._repeat_timer.isActive() is False
