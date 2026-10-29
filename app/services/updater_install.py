@@ -6,6 +6,11 @@
 `Copy-Item -Force`（同样不在目标目录产生旁路文件）。替换失败时用备份还原目标并
 重启旧版。
 
+onefile 打包的程序有 bootloader 父进程 + Python 子进程，`os.getpid()` 只是子进程
+的 pid：子进程先退出时父进程仍映射着 exe（还要清理 `_MEI`），此时替换必然失败。
+因此脚本在快速路径 `Wait-Process -Id` 之后，还会按**进程名**等待所有同名进程退出，
+再以「可独占打开目标 exe」轮询确认解锁（两者各最多 60 s）才开始替换。
+
 脚本正文只用 ASCII 英文（PowerShell 5.1 在无 BOM 时会按 ANSI 解码），并以带 BOM
 的 UTF-8 落盘，保证路径里出现中文用户名时也不会乱码；路径一律单引号包裹并把
 `'` 双写成 `''`。备份、脚本与日志都写在 `work_dir`（即 `data_dir/updates`），
@@ -45,8 +50,8 @@ _POWERSHELL_ARGS = (
     "-File",
 )
 
-# 脚本正文：@NEW_EXE@ / @TARGET_EXE@ / @BACKUP_EXE@ / @LOG_PATH@ / @TARGET_PID@
-# 由 write_install_script 替换。注意两点：
+# 脚本正文：@NEW_EXE@ / @TARGET_EXE@ / @PROCESS_NAME@ / @BACKUP_EXE@ / @LOG_PATH@ /
+# @TARGET_PID@ 由 write_install_script 替换。注意两点：
 # 1) PowerShell 的 $PID 是只读自动变量，等待用的进程号直接内联，不定义同名变量；
 # 2) File.Replace 的第三个参数必须传 [NullString]::Value——PowerShell 会把 $null
 #    转成空字符串传给 .NET string 参数，File.Replace 会因此抛 "The path is empty"。
@@ -54,6 +59,7 @@ _SCRIPT_TEMPLATE = """# PortHelper Fluent update script. Generated automatically
 $ErrorActionPreference = 'Continue'
 $newExe = '@NEW_EXE@'
 $targetExe = '@TARGET_EXE@'
+$processName = '@PROCESS_NAME@'
 $backupExe = '@BACKUP_EXE@'
 $logPath = '@LOG_PATH@'
 
@@ -70,7 +76,30 @@ try {
     catch {
         Write-UpdateLog ('Wait-Process skipped: ' + $_.Exception.Message)
     }
-    Start-Sleep -Milliseconds 900
+    # Onefile builds run a bootloader parent plus a Python child: the reported pid may
+    # exit first while the parent still maps the exe. Wait for every process with the
+    # target name, then poll until the exe can be opened exclusively.
+    try {
+        Get-Process -Name $processName -ErrorAction Stop | Wait-Process -Timeout 60 -ErrorAction SilentlyContinue
+        Write-UpdateLog ('Waited for running processes named ' + $processName)
+    }
+    catch {
+        # No process with that name is running.
+        Write-UpdateLog ('No running process named ' + $processName)
+    }
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $stream = [System.IO.File]::Open('@TARGET_EXE@', 'Open', 'ReadWrite', 'None')
+            $stream.Close()
+            Write-UpdateLog 'Target exe is no longer locked.'
+            break
+        }
+        catch {
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    Start-Sleep -Milliseconds 400
     try {
         # Third argument is the backup path: PowerShell converts $null to an empty
         # string for .NET string parameters, so [NullString]::Value is required.
@@ -149,6 +178,7 @@ def write_install_script(
     content = (
         _SCRIPT_TEMPLATE.replace("@NEW_EXE@", _ps_escape(new_exe))
         .replace("@TARGET_EXE@", _ps_escape(target))
+        .replace("@PROCESS_NAME@", _ps_escape_text(target.stem))
         .replace("@BACKUP_EXE@", _ps_escape(_backup_path(work_dir)))
         .replace("@LOG_PATH@", _ps_escape(work_dir / UPDATE_LOG_NAME))
         .replace("@TARGET_PID@", str(int(pid)))
@@ -221,5 +251,10 @@ def _rotate_update_log(work_dir: Path) -> None:
 
 
 def _ps_escape(path: Path) -> str:
-    """转义 PowerShell 单引号字符串的内容部分；路径内的 `'` 双写成 `''`。"""
-    return str(path).replace("'", "''")
+    """转义路径中的 PowerShell 单引号内容；路径内的 `'` 双写成 `''`。"""
+    return _ps_escape_text(str(path))
+
+
+def _ps_escape_text(text: str) -> str:
+    """转义任意文本里的 PowerShell 单引号内容（用于进程名等非路径值）。"""
+    return str(text).replace("'", "''")

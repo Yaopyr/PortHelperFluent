@@ -30,10 +30,19 @@ def test_install_script_is_ascii_and_contains_required_steps(tmp_path: Path) -> 
 
     assert script == work_dir / INSTALL_SCRIPT_NAME
     assert script.exists()
+    # 必须带 BOM 落盘：PowerShell 5.1 才会按 UTF-8 而不是 ANSI 解码
+    assert script.read_bytes()[:3] == b"\xef\xbb\xbf"
     text = script.read_text(encoding="utf-8-sig")
     # 脚本正文不得含中文：PowerShell 5.1 读取非 ASCII 字符时容易乱码。
     assert text.isascii()
+    # 快速路径：先按 pid 等待（失败只记日志）
     assert "Wait-Process -Id 4321 -Timeout 60" in text
+    # onefile 的父进程还在映射 exe：按进程名等待所有同名进程退出
+    assert f"$processName = '{target.stem}'" in text
+    assert "Get-Process -Name $processName -ErrorAction Stop | Wait-Process -Timeout 60" in text
+    # 再轮询直到目标 exe 可以被独占打开（最多 60 秒）
+    assert f"[System.IO.File]::Open('{target}', 'Open', 'ReadWrite', 'None')" in text
+    assert "$deadline = (Get-Date).AddSeconds(60)" in text
     # 优先用 .NET 的原子替换，绝不在目标目录产生 .new 之类的旁路文件
     assert f"[System.IO.File]::Replace('{new_exe}', '{target}', [NullString]::Value)" in text
     assert f"Copy-Item -LiteralPath '{new_exe}' -Destination '{target}' -Force" in text
@@ -46,9 +55,11 @@ def test_install_script_is_ascii_and_contains_required_steps(tmp_path: Path) -> 
     assert f"Copy-Item -LiteralPath $backupExe -Destination '{target}' -Force" in text
     assert "Restored the backup exe." in text
     assert str(work_dir / UPDATE_LOG_NAME) in text
-    # 顺序必须是：等待旧进程 → 原子替换 → 重启
+    # 顺序必须是：按 pid 等待 → 按进程名等待 → 等解锁 → 原子替换 → 重启
     positions = [
         text.index("Wait-Process -Id"),
+        text.index("Get-Process -Name"),
+        text.index("[System.IO.File]::Open("),
         text.index("[System.IO.File]::Replace("),
         text.index("Start-Process -FilePath"),
     ]
@@ -66,6 +77,16 @@ def test_install_script_escapes_single_quotes(tmp_path: Path) -> None:
 
     assert "it''s" in text
     assert text.count("''") >= 2
+
+
+def test_install_script_escapes_process_name(tmp_path: Path) -> None:
+    target = tmp_path / "PortHelper's.exe"
+
+    text = write_install_script(
+        tmp_path / "new.exe", target, tmp_path / "updates", pid=9
+    ).read_text(encoding="utf-8-sig")
+
+    assert "$processName = 'PortHelper''s'" in text
 
 
 def test_install_update_backs_up_and_launches_script(tmp_path: Path, monkeypatch) -> None:
