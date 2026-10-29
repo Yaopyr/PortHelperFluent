@@ -20,7 +20,7 @@
 python -m pip install -r requirements.txt
 ```
 
-核心依赖：PyQt6、PyQt6-Fluent-Widgets、pyserial、psutil、Pillow、numpy、hidapi、qrcode；测试与打包：pytest、PyInstaller。
+核心依赖：PyQt6、PyQt6-Fluent-Widgets、pyserial、psutil、Pillow、numpy、hidapi、qrcode、bleak、winrt-Windows.*（蓝牙，仅 Windows）；测试与打包：pytest、PyInstaller。
 
 确认 qfluentwidgets 当前绑定的是 PyQt6：
 
@@ -56,9 +56,9 @@ python -m pytest
 - 校验已知向量、CRC 独立参考、C51 寄存器、RGB565/RGB332、扫描/位序；
 - 配置损坏恢复、便携目录回退、日志上限、截断提示；
 - 本地 TCP/UDP 回环、TCP 服务端多客户端、UDP 域名队列；
-- 串口/HID 假传输、页面离屏实例化、真实按钮点击。
+- 串口/HID 假传输、蓝牙 BLE/SPP 假设备、页面离屏实例化、真实按钮点击。
 
-当前基线：**683 passed**。硬件 I/O、Keil 打开工程属于手工验收。
+当前基线：**748 passed**。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
 
 单独跑某类测试：
 
@@ -101,7 +101,7 @@ dist\build.log
 python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work build/app.spec
 ```
 
-`build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial，以及图标/版本信息。不要额外关闭这些依赖，否则运行时会缺模块。
+`build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial、bleak 与 winrt，以及图标/版本信息。bleak 与 winrt 用 `collect_submodules` 收集全部子模块——WinRT 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩。不要额外关闭这些依赖，否则运行时会缺模块。
 
 ## 发布 Release
 
@@ -197,6 +197,16 @@ python -m pip install --force-reinstall PyQt6-Fluent-Widgets==1.11.2
 python -m pip install hidapi==0.15.0 qrcode==8.2
 ```
 
+### 无法导入 bleak / winrt（蓝牙页报错，或 exe 启动即崩）
+
+这四组包只在 Windows 上有可用后端：
+
+```bash
+python -m pip install bleak==3.0.2 winrt-Windows.Devices.Bluetooth.Rfcomm==3.2.1 winrt-Windows.Networking==3.2.1 winrt-Windows.Networking.Sockets==3.2.1
+```
+
+打包后如果漏收 WinRT 的 `.pyd`，`--selftest` 会报「依赖 winrt.windows.… 导入失败」，构建脚本会以「module not available: winrt.windows.networking.sockets」中止；确认 `build/app.spec` 里的 `collect_submodules("bleak") + collect_submodules("winrt")` 没被删掉。
+
 ### MP3 转换提示缺少 ffmpeg
 
 安装 ffmpeg 并加入 PATH；或改用 WAV。WAV 只支持 PCM。
@@ -219,6 +229,7 @@ qfluentwidgets 的 acrylic 辅助代码引用了可选模块；本项目使用 M
 
 - [ ] 真实串口：枚举、打开/关闭、波特率、DTR/RTS、BREAK、文本/HEX 收发、连续发送、文件发送、会话导出。
 - [ ] 真实 HID：枚举、VID/PID/产品名、报告 ID/长度、读写、拔出自动复位。
+- [ ] 蓝牙：BLE 扫描/连接/服务树/读/写/通知订阅（可与手机端工具比对），SPP 一键配对（PIN 弹窗与配对码确认）、RFCOMM 收发、系统蓝牙 COM 备用通道，断开后界面复位。
 - [ ] 网络：TCP 连接/断开/被拒绝、UDP 绑定/收发、域名解析、Ping、网卡信息、服务端多客户端与广播。
 - [ ] 校验：与独立工具对比 CRC/Sum/Intel HEX/TCP-IP 结果。
 - [ ] 图片：C/BIN/LVGL 导出在目标屏或查看器中正确。

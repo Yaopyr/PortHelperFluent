@@ -252,12 +252,12 @@ IO 信号 → LogPane.append_bytes()
 
 ## 已知技术债
 
-- `image_page.py`、`dotmatrix_page.py`、`c51_page.py`、`net_client_page.py` 等文件 900–1200 行，后续可拆分为控制器 + 视图。
+- `image_page.py`、`dotmatrix_page.py`、`c51_page.py`、`net_client_page.py` 等文件 900–1200 行，`bluetooth_page.py` 已达 1959 行（仓库内最大页面，优先拆分）；后续可拆分为控制器 + 视图。
 - 图片/点阵批量与音频解码仍在 GUI 线程；超大文件可能短暂卡顿。
 - `core → services` 的文件工具引用需要下沉。
 - 分栏比例、最近导出目录尚未全部记忆。
 - 日志方向仅用 `[RX]/[TX]` 前缀区分，未做逐行颜色。
-- 真实串口/HID/Keil 属手工验收，不在自动测试范围。
+- 真实串口/HID/蓝牙设备/Keil 属手工验收，不在自动测试范围。
 - 蓝牙：BLE 的 MTU 与连接后的 RSSI 都只读（bleak 3 的 Windows 后端不提供 `request_mtu`/`get_rssi`），不能主动请求 MTU；SPP 依赖 WinRT（配对、RFCOMM），只在 Windows 10/11 可用，没有跨平台后端；不做删除配对、多设备并发与 BLE 固件升级。
 - 更新仅支持 GitHub 正式 Release，无增量更新与代码签名。
 

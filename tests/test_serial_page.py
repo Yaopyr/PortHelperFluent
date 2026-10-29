@@ -165,6 +165,7 @@ def test_repeat_send_starts_and_stops(qapp, tmp_path, monkeypatch):
         page.interval_spin.setValue(20)
         page.repeat_check.setChecked(True)
         assert page._repeat_timer.isActive()
+        assert page._repeat_timer.interval() == 20
         # 定时器间隔 20 ms，但首次触发由事件循环调度决定；固定 qWait(120) 在
         # 高负载下可能一次都没跑到，改为最多等 2 秒直到第 2 次发送发生。
         assert process_events_until(lambda: len(worker.sent) >= 2, timeout_ms=2000)
