@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 import pytest
@@ -15,7 +16,7 @@ from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import CaptionLabel
 
 from app.core.settings import Settings
-from app.io.ble_worker import BleCharInfo, BleDeviceInfo, BleServiceInfo
+from app.io.ble_worker import BleCharInfo, BleDeviceInfo, BleServiceInfo, BleWorker
 from app.io.serial_worker import PortInfo
 from app.io.spp_worker import ClassicDeviceInfo
 from app.services.paths import resolve_paths
@@ -247,6 +248,45 @@ class FakeSppWorker(QObject):
     def shutdown(self, timeout: float = 3.0) -> None:
         self.calls.append(("shutdown",))
         self.finished.emit()
+
+
+class SlowBleBackend:
+    """真实 `BleWorker` 用的假后端：`connect()` 故意慢，用来复现「连接在飞时断开/切模式」。"""
+
+    def __init__(self, delay: float = 0.3) -> None:
+        self.delay = delay
+        self.calls: list[tuple] = []
+
+    def set_disconnect_callback(self, callback) -> None:
+        self.disconnect_cb = callback
+
+    async def scan(self, duration, on_device, stop) -> None:
+        self.calls.append(("scan", duration))
+
+    async def connect(self, address: str) -> None:
+        self.calls.append(("connect", address))
+        await asyncio.sleep(self.delay)
+
+    async def disconnect(self) -> None:
+        self.calls.append(("disconnect",))
+
+    async def services(self) -> list[BleServiceInfo]:
+        self.calls.append(("services",))
+        return list(SERVICES)
+
+    def mtu(self) -> int:
+        self.calls.append(("mtu",))
+        return 23
+
+    async def read(self, char_uuid: str) -> bytes:
+        self.calls.append(("read", char_uuid))
+        return b""
+
+    async def write(self, char_uuid: str, data: bytes, response: bool) -> None:
+        self.calls.append(("write", char_uuid, bytes(data), response))
+
+    async def set_notify(self, char_uuid: str, enabled: bool, on_data) -> None:
+        self.calls.append(("notify", char_uuid, enabled))
 
 
 @pytest.fixture
@@ -756,3 +796,92 @@ def test_repeat_toggle_without_target_stays_off(page):
 
     assert widget.repeat_check.isChecked() is False
     assert widget._repeat_timer.isActive() is False
+
+
+def test_error_stops_repeat_send(page):
+    widget, _settings, ble, _spp = page
+    _warm_ble(widget, ble)
+    ble.emit_connected()
+    widget.service_tree.setCurrentItem(_tree_item(widget.service_tree, "FFE1"))
+    widget.hex_send_check.setChecked(True)
+    widget.send_editor.setPlainText("01 02")
+
+    widget.repeat_check.setChecked(True)
+    assert widget._repeat_timer.isActive() is True
+
+    # 「写入已提交、worker 侧才失败」时 `_send_current()` 仍返回 True，
+    # 只能靠错误信号停掉连续发送，否则每一拍都会再叠一条错误提示。
+    ble.error.emit("蓝牙已关闭，请在设置中打开")
+
+    assert widget._repeat_timer.isActive() is False
+    assert widget.repeat_check.isChecked() is False
+
+
+def _ble_page_with_slow_connect(monkeypatch, tmp_path, delay: float = 0.3):
+    """真实 `BleWorker` + 慢连接假后端建页面：复现「连接在飞时断开 / 切模式」。"""
+    monkeypatch.setattr(bluetooth_page_module, "list_ports", lambda: list(BLUETOOTH_PORTS))
+    paths = resolve_paths(exe_path=tmp_path / "exe", appdata=tmp_path / "appdata")
+    settings = Settings(paths.config_file)
+    settings.load()
+    backend = SlowBleBackend(delay)
+    widget = BluetoothPage(settings, paths, ble_worker_factory=lambda: BleWorker(backend))
+    widget.show()
+    return widget, backend
+
+
+def _wait_backend_disconnects(backend, count: int = 2) -> bool:
+    """等 worker 拆掉迟到的链路；期间持续处理 Qt 事件，让页面收到排队信号。"""
+    return process_events_until(
+        lambda: len([call for call in backend.calls if call[0] == "disconnect"]) >= count,
+        timeout_ms=3000,
+    )
+
+
+def test_disconnect_while_ble_connecting_cancels_late_connection(
+    qapp, tmp_path, monkeypatch
+):
+    widget, backend = _ble_page_with_slow_connect(monkeypatch, tmp_path)
+    try:
+        widget._start_ble_connect(ADDRESS)
+        assert widget._ble_connecting is True
+        assert widget.connect_button.text() == "断开"
+
+        widget.connect_button.click()
+
+        # 用户那条 disconnect + 取消后的清理：迟到的链路必须被拆掉。
+        assert _wait_backend_disconnects(backend)
+        # 再泵一轮事件：迟到的 connected 不能把页面拉回「已连接」。
+        assert not process_events_until(lambda: widget._ble_connected, timeout_ms=300)
+        assert widget._ble_connecting is False
+        assert widget.connect_button.text() == "连接"
+        assert widget.send_button.isEnabled() is False
+        assert widget.has_active_work() is False
+        log = _log_text(widget)
+        assert "已断开 BLE：用户断开" in log
+        assert "已连接" not in log
+    finally:
+        _destroy(widget)
+
+
+def test_mode_switch_while_ble_connecting_leaves_no_active_link(
+    qapp, tmp_path, monkeypatch
+):
+    widget, backend = _ble_page_with_slow_connect(monkeypatch, tmp_path)
+    try:
+        widget._start_ble_connect(ADDRESS)
+        assert widget._ble_connecting is True
+
+        widget.mode_segment.setCurrentItem("spp")
+        assert widget.current_mode() == "spp"
+
+        assert _wait_backend_disconnects(backend)
+        assert not process_events_until(lambda: widget._ble_connected, timeout_ms=300)
+        assert widget._ble_connecting is False
+        # 切到 SPP 后不能还留着一条 BLE 链路，否则还能再开第二条连接。
+        assert widget.connect_button.text() == "连接"
+        assert widget.spp_info_label.text() == "未连接"
+        assert widget.spp_connect_button.text() == "一键连接"
+        assert widget.status_chip.text() == "未连接"
+        assert widget.has_active_work() is False
+    finally:
+        _destroy(widget)

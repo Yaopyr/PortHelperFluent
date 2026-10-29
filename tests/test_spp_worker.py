@@ -16,7 +16,12 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 import app.io.spp_worker as spp_worker
 from app.io.serial_worker import SerialConfig
-from app.io.spp_worker import ClassicDeviceInfo, SppWorker, WinRtRfcommLocator
+from app.io.spp_worker import (
+    ClassicDeviceInfo,
+    SppWorker,
+    WinRtRfcommLocator,
+    WinRtSppBackend,
+)
 
 DIRECT = Qt.ConnectionType.DirectConnection
 PAIRED_DEVICE = ClassicDeviceInfo("已配对设备", "11:22:33:44:55:66", True, "id-paired")
@@ -41,6 +46,7 @@ class FakeSppBackend:
         self.sent: list[bytes] = []
         self.data_cb = None
         self.prompt_cb = None
+        self.disconnect_cb = None
 
     def set_data_callback(self, callback) -> None:
         self.data_cb = callback
@@ -48,10 +54,18 @@ class FakeSppBackend:
     def set_prompt_callback(self, callback) -> None:
         self.prompt_cb = callback
 
+    def set_disconnect_callback(self, callback) -> None:
+        self.disconnect_cb = callback
+
     def deliver(self, data: bytes) -> None:
         """模拟 RFCOMM 读到数据，在调用线程里直接回调 worker。"""
         assert self.data_cb is not None
         self.data_cb(bytes(data))
+
+    def report_peer_disconnect(self) -> None:
+        """模拟读取循环因对端关闭而退出，在调用线程里直接回调 worker。"""
+        assert self.disconnect_cb is not None
+        self.disconnect_cb("设备主动断开连接")
 
     async def scan(self, duration, on_device, stop) -> None:
         self.calls.append(("scan", duration))
@@ -186,6 +200,39 @@ def test_rfcomm_locator_raises_when_no_service_found():
     with pytest.raises(RuntimeError, match="SPP 串口服务"):
         asyncio.run(locator.locate(PAIRED_DEVICE))
     assert [call[0] for call in calls] == ["from_device_id", "from_address"]
+
+
+class FakeDataReader:
+    """`DataReader` 替身：先吐给定字节数，之后返回 0（对端关闭）或抛脚本异常。"""
+
+    def __init__(self, sizes: tuple[int, ...] = (), *, error: Exception | None = None) -> None:
+        self._sizes = list(sizes)
+        self._error = error
+
+    async def load_async(self, _size: int) -> int:
+        if self._sizes:
+            return self._sizes.pop(0)
+        if self._error is not None:
+            raise self._error
+        return 0
+
+    def read_buffer(self, size: int) -> bytes:
+        return b"x" * size
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [FakeDataReader((2,)), FakeDataReader(error=OSError("COMError 0x8007048F"))],
+    ids=["zero-bytes", "com-error"],
+)
+def test_read_loop_reports_peer_disconnect_once(reader):
+    backend = WinRtSppBackend()
+    reasons: list[str] = []
+    backend.set_disconnect_callback(reasons.append)
+    asyncio.run(backend._read_loop(reader))
+    # 同一条链路只报一次：再跑一遍也还是那一条（不能和自己的 close() 叠加成两条）。
+    asyncio.run(backend._read_loop(FakeDataReader()))
+    assert reasons == ["设备主动断开连接"]
 
 
 def test_scan_emits_paired_and_unpaired_devices(qapp):
@@ -409,6 +456,39 @@ def test_disconnect_reason_emitted_once(qapp):
         assert backend.closed is True
         assert worker.is_connected() is False
         assert worker.channel() == ""
+    finally:
+        worker.shutdown()
+
+
+def test_peer_disconnect_converges_to_single_reason(qapp):
+    backend = FakeSppBackend()
+    worker = SppWorker(backend)
+    reasons: list[str] = []
+    connected = threading.Event()
+    reason_done = threading.Event()
+    worker.connected.connect(lambda channel, name: connected.set(), type=DIRECT)
+    worker.disconnected.connect(
+        lambda reason: (reasons.append(reason), reason_done.set()), type=DIRECT
+    )
+    worker.start()
+    try:
+        assert worker.connect_device(PAIRED_DEVICE) is True
+        assert connected.wait(3)
+        assert worker.is_connected() is True
+        assert worker.channel() == "RFCOMM"
+
+        # 对端主动断开（读取循环读到 0 字节 / WinRT 抛 COMError）：收敛成一条 disconnected。
+        backend.report_peer_disconnect()
+        assert reason_done.wait(3)
+        assert reasons == ["设备主动断开连接"]
+        assert worker.is_connected() is False
+        assert worker.channel() == ""
+        # 通道清空后发送被拒绝，界面才会禁用发送区。
+        assert worker.send(b"ping") is False
+
+        # 幂等：同一条链路再报一次不会重复发 disconnected。
+        backend.report_peer_disconnect()
+        assert reasons == ["设备主动断开连接"]
     finally:
         worker.shutdown()
 

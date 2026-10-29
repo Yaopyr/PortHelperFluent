@@ -24,6 +24,16 @@ async def _noop() -> None:
     return None
 
 
+def _wait_until(predicate, timeout: float = 3.0) -> None:
+    """轮询等待后台线程的结果；测试只用 `time.monotonic()`，不碰 Qt 事件循环。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    assert predicate(), "等待后台线程结果超时"
+
+
 class FakeBleBackend:
     """按脚本应答的假后端：记录调用、可指定在某一步抛异常。"""
 
@@ -357,6 +367,37 @@ def test_scan_failure_resets_state_and_emits_finished(qapp):
         backend.fail_on = None
         assert worker.start_scan(1) is True
         assert worker.stop_scan() is True
+    finally:
+        worker.shutdown()
+
+
+def test_disconnect_while_connecting_cancels_connection(qapp):
+    backend = FakeBleBackend()
+    backend.connect_delay = 0.3
+    worker = BleWorker(backend)
+    connected: list[tuple[str, int]] = []
+    services: list[list[BleServiceInfo]] = []
+    reasons: list[str] = []
+    worker.connected.connect(
+        lambda address, mtu: connected.append((address, mtu)), type=DIRECT
+    )
+    worker.services_ready.connect(services.append, type=DIRECT)
+    worker.disconnected.connect(reasons.append, type=DIRECT)
+    worker.start()
+    try:
+        assert worker.connect_device("AA:BB:CC:DD:EE:FF") is True
+        # 30 秒连接窗口内点断开：挂取消标志，并同步发一条 disconnected。
+        assert worker.disconnect_device("连接中取消") is True
+        # 连接协程跑完必须自己拆掉：用户那条 disconnect + 取消后的清理共两次。
+        _wait_until(
+            lambda: len([call for call in backend.calls if call[0] == "disconnect"]) >= 2
+        )
+        # 迟到的 connected 一条都不能发（旧实现会在这里把链路「复活」）。
+        time.sleep(0.3)
+        assert connected == []
+        assert services == []
+        assert reasons == ["连接中取消"]
+        assert worker.is_connected() is False
     finally:
         worker.shutdown()
 

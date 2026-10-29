@@ -1082,6 +1082,8 @@ class BluetoothPage(QWidget):
     @safe_slot
     def _on_bluetooth_error(self, message: str) -> None:
         text = str(message) or "蓝牙操作失败"
+        # 出错先停连续发送：否则每一拍都再报一次错，模态/信息条会一直叠。
+        self._stop_repeat()
         self._ble_connecting = False
         self._spp_connecting = False
         self._refresh_connection_state()
@@ -1924,6 +1926,7 @@ class BluetoothPage(QWidget):
         self._scan_remaining = 0
         self._scan_timer.stop()
         self.scan_button.setText("开始扫描")
+        self.spp_scan_button.setText("开始扫描")
         self.scan_remain_label.setText("")
 
     def closeEvent(self, event) -> None:

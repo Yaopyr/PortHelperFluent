@@ -212,6 +212,7 @@ class BleWorker(AsyncLoopWorker):
         self._scan_stop = threading.Event()
         self._connected = False
         self._connecting = False
+        self._connect_cancelled = threading.Event()
         self._self_disconnect = threading.Event()
 
     def _on_backend_disconnect(self, reason: str) -> None:
@@ -260,6 +261,7 @@ class BleWorker(AsyncLoopWorker):
         if self._connecting or self._connected:
             # 连接在飞或已连着：再连会覆盖 backend 里的 client，留下一条泄漏连接。
             return False
+        self._connect_cancelled.clear()
         self._connecting = True
         if not self._submit_or_report(lambda: self._connect_coroutine(address)):
             self._connecting = False
@@ -267,6 +269,10 @@ class BleWorker(AsyncLoopWorker):
         return True
 
     def disconnect_device(self, reason: str = "用户断开") -> bool:
+        if self._connecting:
+            # 连接还在飞：挂上取消标志，连接协程建好后会自己拆掉，
+            # 否则「断开」之后连接照样生效，界面出现「断开又连上」。
+            self._connect_cancelled.set()
         return self._submit_or_report(lambda: self._disconnect_coroutine(reason))
 
     async def _connect_coroutine(self, address: str) -> None:
@@ -279,9 +285,25 @@ class BleWorker(AsyncLoopWorker):
             except TimeoutError:
                 self.error.emit(explain_error("connect", "连接超时"))
                 return
+            if self._connect_cancelled.is_set():
+                # 用户在连接中点过断开：这条链路建得太晚，直接拆掉，
+                # 既不置连接状态也不发 connected，界面不会出现「断开后又连上」。
+                # 被动断开回调要静音，否则拆链路时会多弹一条「设备主动断开连接」；
+                # 用户那条断开已经在抑制时不要替它清标志。
+                own_guard = not self._self_disconnect.is_set()
+                if own_guard:
+                    self._self_disconnect.set()
+                try:
+                    await self._backend.disconnect()
+                finally:
+                    if own_guard:
+                        self._self_disconnect.clear()
+                    self._connected = False
+                return
             self._connected = True
         finally:
             self._connecting = False
+            self._connect_cancelled.clear()
         self.services_ready.emit(services)
         self.connected.emit(address, mtu)
         self.mtu_changed.emit(mtu)

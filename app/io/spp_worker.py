@@ -36,6 +36,7 @@ CHANNEL_RFCOMM = "RFCOMM"
 PAIR_SUCCESS = frozenset({"PAIRED", "ALREADY_PAIRED"})
 ALREADY_PAIRED_TEXT = "已配对，跳过配对"
 NOT_CONNECTED_MESSAGE = "经典蓝牙未连接"
+PEER_DISCONNECT_MESSAGE = "设备主动断开连接"
 SPP_SERVICE_MISSING_MESSAGE = "设备未提供 SPP 串口服务"
 NOT_RUNNING_MESSAGE = "经典蓝牙后台线程未运行，请重新扫描"
 SERIAL_CLOSED_MESSAGE = "串口已关闭"
@@ -67,6 +68,8 @@ class SppBackend(Protocol):
     def set_data_callback(self, callback: Callable[[bytes], None]) -> None: ...
 
     def set_prompt_callback(self, callback: Callable[[str, str], str | None]) -> None: ...
+
+    def set_disconnect_callback(self, callback: Callable[[str], None]) -> None: ...
 
     async def scan(
         self,
@@ -170,16 +173,21 @@ class WinRtSppBackend:
     def __init__(self, locator: WinRtRfcommLocator | None = None) -> None:
         self._data_cb: Callable[[bytes], None] | None = None
         self._prompt_cb: Callable[[str, str], str | None] | None = None
+        self._disconnect_cb: Callable[[str], None] | None = None
         self._locator = locator if locator is not None else WinRtRfcommLocator()
         self._socket = None
         self._reader = None
         self._reader_task: asyncio.Task | None = None
+        self._peer_reported = False
 
     def set_data_callback(self, callback: Callable[[bytes], None]) -> None:
         self._data_cb = callback
 
     def set_prompt_callback(self, callback: Callable[[str, str], str | None]) -> None:
         self._prompt_cb = callback
+
+    def set_disconnect_callback(self, callback: Callable[[str], None]) -> None:
+        self._disconnect_cb = callback
 
     # ---- 扫描 ---------------------------------------------------------
 
@@ -266,6 +274,7 @@ class WinRtSppBackend:
             socket.close()
             raise
         self._socket = socket
+        self._peer_reported = False
         reader = DataReader(socket.input_stream)
         reader.input_stream_options = InputStreamOptions.PARTIAL
         self._reader = reader
@@ -282,9 +291,20 @@ class WinRtSppBackend:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # 设备断电/主动断开时 WinRT 会让 load_async 抛 COMError；连接已经断了，
-            # 下一次发送会拿到中文错误，这里只记日志，不要把异常抛到界面上。
+            # 设备断电/主动断开时 WinRT 会让 load_async 抛 COMError；链路已经没了，
+            # 异常本身只记日志，由下面的断开回调把状态收成一条 disconnected。
             get_logger().debug("经典蓝牙读取循环结束", exc_info=True)
+        # 0 字节或异常都说明对端断开；主动 close() 走 CancelledError，不会到这里。
+        self._report_peer_disconnect()
+
+    def _report_peer_disconnect(self) -> None:
+        """对端断开只报告一次：`close()` 取消读取循环时不会重复上报。"""
+        if self._peer_reported:
+            return
+        self._peer_reported = True
+        callback = self._disconnect_cb
+        if callback is not None:
+            callback(PEER_DISCONNECT_MESSAGE)
 
     def _deliver(self, data: bytes) -> None:
         callback = self._data_cb
@@ -352,6 +372,7 @@ class SppWorker(AsyncLoopWorker):
         self._backend = backend if backend is not None else WinRtSppBackend()
         self._backend.set_data_callback(self._on_backend_data)
         self._backend.set_prompt_callback(self._prompt)
+        self._backend.set_disconnect_callback(self._on_backend_disconnect)
         self._serial_factory = serial_factory if serial_factory is not None else SerialWorker
         # 通道状态会被界面线程和后台线程同时读写，统一用一把锁守。
         self._state_lock = threading.Lock()
@@ -654,6 +675,16 @@ class SppWorker(AsyncLoopWorker):
 
     def _on_backend_data(self, data: bytes) -> None:
         self.data_received.emit(bytes(data))
+
+    def _on_backend_disconnect(self, reason: str) -> None:
+        """对端主动断开（读取循环退出 / 设备消失）：清通道并把状态收成一条 disconnected。"""
+        with self._state_lock:
+            if not self._connected or self._channel != CHANNEL_RFCOMM:
+                # 自己已经断开过，或当前走的是 COM 通道：没有可收敛的东西。
+                return
+            self._connected = False
+            self._channel = ""
+        self.disconnected.emit(reason or PEER_DISCONNECT_MESSAGE)
 
     def _submit_or_report(self, factory: Callable[[], Coroutine[Any, Any, None]]) -> bool:
         """投递任务；后台线程不可用时发一次提示并返回 False。"""
