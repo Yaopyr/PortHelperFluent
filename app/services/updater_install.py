@@ -9,7 +9,8 @@
 脚本正文只用 ASCII 英文（PowerShell 5.1 在无 BOM 时会按 ANSI 解码），并以带 BOM
 的 UTF-8 落盘，保证路径里出现中文用户名时也不会乱码；路径一律单引号包裹并把
 `'` 双写成 `''`。备份、脚本与日志都写在 `work_dir`（即 `data_dir/updates`），
-exe 所在目录（例如桌面）**不会新增任何文件**：替换直接落到目标 exe 上。
+exe 所在目录（例如桌面）不会留下文件（写权限探针创建后立即删除）：替换直接落到
+目标 exe 上。
 """
 
 from __future__ import annotations

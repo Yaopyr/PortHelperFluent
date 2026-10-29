@@ -123,7 +123,7 @@
 - 关于：版本、独立复刻声明、原程序参考、明确不支持项、依赖许可、REA 证据说明。
 - 更新：卡片显示当前版本；「检查更新」手动查询 GitHub Releases 最新正式版，「启动时检查」开关可关闭启动时的静默检查（默认开启）。
 - 发现新版本时显示更新说明；点「下载并安装」后台下载并校验 SHA-256，确认后程序关闭、替换 exe 并自动重启（会先断开串口/网络/HID 连接）。
-- 下载包、备份、安装脚本与 `update.log` 都在 `%APPDATA%\PortHelperFluent\updates`，不会在 exe 所在目录（如桌面）新增文件；便携模式落在 `data\updates`。
+- 下载包、备份、安装脚本与 `update.log` 都在 `%APPDATA%\PortHelperFluent\updates`，不会在 exe 所在目录（如桌面）留下文件（写权限探针创建后立即删除）；便携模式落在 `data\updates`。
 - 源码运行（`python main.py`）只下载不替换，按提示手动替换打包后的 exe。
 
 ## 故障排查
