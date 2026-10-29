@@ -80,6 +80,13 @@ function Assert-SelftestReport {
             throw "$Label reports module not available: $moduleName"
         }
     }
+    # A literal dotted key would be parsed as a nested property path; reading it
+    # through the loop variable keeps it a single property name.
+    foreach ($moduleName in @('bleak', 'winrt.windows.devices.bluetooth.rfcomm', 'winrt.windows.networking.sockets')) {
+        if ($payload.resources.modules.$moduleName -ne $true) {
+            throw "$Label reports module not available: $moduleName"
+        }
+    }
     if ($payload.resources.qfluentwidgets -ne 'ok') {
         throw "$Label reports qfluentwidgets resources unavailable"
     }

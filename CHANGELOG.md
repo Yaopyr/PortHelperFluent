@@ -2,6 +2,28 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
+## [Unreleased]
+
+新增「蓝牙调试」页面：同时覆盖 BLE 与经典蓝牙 SPP，一页完成扫描、配对、收发。
+
+### Added
+
+- 「通信」分组新增「蓝牙调试」路由（导航在「串口调试」之后），页内用分段控件切换 BLE / 经典蓝牙，日志与发送区两种模式共用。
+- BLE：扫描（5/10/20 秒、名称/地址过滤、按信号强度/名称/最近发现排序、仅显示有名称）、连接、服务/特征值树（SIG 名称、属性徽章、UUID 过滤）、读取、写（含写入需应答）、通知订阅、MTU 显示与刷新、最后一次广播的 RSSI、`忽略空通知`。
+- 经典蓝牙 SPP：设备扫描（约 12 秒、只看已配对）、一键配对 + 连接（需要 PIN 时弹窗预填 `1234`、只需确认时应用内核对配对码）、RFCOMM 直连；系统蓝牙 COM 口作为备用通道（波特率默认 115200）。
+- 两种模式共用文本/HEX、行尾、连续发送、文件发送（BLE 按 MTU-3 分片、SPP 按 4 KiB）、多项发送、收发计数与会话 TXT/CSV 导出；同一时刻只保留一条活动连接。
+- 收藏与别名（右键菜单）、记住上次设备（只自动选中不自动连接，「打开页面自动连接上次设备」显式开关默认关闭）。
+- 蓝牙不可用/失败时给出中文原因与下一步建议，并提供「打开蓝牙设置」按钮（`ms-settings:bluetooth`）。
+- 新增配置键：`bluetooth.mode`、`bluetooth.last_device`、`bluetooth.last_device_name`、`bluetooth.auto_connect`、`bluetooth.favorites`、`bluetooth.aliases`、`bluetooth.hex_send`、`bluetooth.hex_display`、`bluetooth.spp_baud`、`bluetooth.spp_com`、`bluetooth.write_with_response`、`bluetooth.mtu_chunk`、`bluetooth.ignore_empty_notify`。
+- 新增依赖 `bleak==3.0.2`、`winrt-Windows.Devices.Bluetooth.Rfcomm==3.2.1`、`winrt-Windows.Networking==3.2.1`、`winrt-Windows.Networking.Sockets==3.2.1`；PyInstaller 用 `collect_submodules` 收集 bleak 与 `winrt`，`--selftest` 与构建脚本断言三项模块可导入。
+- 748 项 pytest 测试；蓝牙服务纯函数、BLE/SPP worker（注入假 scanner/client/配对器/socket，起真线程）与页面（假 worker 发信号）全部覆盖，不需要真机或蓝牙适配器。
+
+### Known Limitations
+
+- BLE 的 MTU 与连接后的 RSSI 都只读（Windows 由系统协商，bleak 3 无 `request_mtu`/`get_rssi`），不能主动请求 MTU。
+- SPP 依赖 WinRT，仅 Windows 10/11；不做删除配对、多设备并发与 BLE 固件升级。
+- 真实蓝牙设备（HC-05/JDY-31、BLE 透传模块等）的扫描/配对/收发属手工验收项。
+
 ## [1.0.1] - 2026-10-28
 
 在线更新：从 GitHub Releases 检查并安装新版本，同时保留 1.0.0 的全部功能。

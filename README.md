@@ -6,7 +6,7 @@
   ![Platform](https://img.shields.io/badge/platform-Windows%2011-0A84FF)
   ![Python](https://img.shields.io/badge/python-3.13-3776AB)
   ![PyQt6](https://img.shields.io/badge/PyQt6-6.11-41CD52)
-  ![Tests](https://img.shields.io/badge/tests-683%20passed-0F7B0F)
+  ![Tests](https://img.shields.io/badge/tests-748%20passed-0F7B0F)
   ![License](https://img.shields.io/badge/license-MIT-blue)
 </div>
 
@@ -32,6 +32,7 @@
 | 页面 | 主要能力 |
 | --- | --- |
 | 串口调试 | 串口枚举与描述、波特率/数据位/停止位/校验/流控/编码、DTR/RTS/BREAK、CTS/DSR/RING/RLSD、文本/HEX、时间戳、暂停、连续发送、文件发送、多项发送、会话记录与 TXT/CSV 导出 |
+| 蓝牙调试 | BLE 扫描/连接、服务树、读/写/通知订阅、MTU 与 RSSI 显示；经典蓝牙扫描、一键配对（PIN 弹窗）、RFCOMM 直连与系统蓝牙 COM 口回退；文本/HEX、行尾、连续/文件发送、会话导出 |
 | 网络调试 | TCP 客户端、UDP、目标 IP/域名、源/目的端口、Ping、域名转 IP、网卡信息（含默认网关）、文本/HEX、连续/文件发送、TCP/UDP 会话记录 |
 | 网络服务器 | TCP 监听、客户端列表、按客户端发送、广播、断开客户端、收发计数、会话导出 |
 | USB HID | 标准 HID 设备枚举与过滤、VID/PID/产品名/Usage、报告 ID/长度、读写、连续/文件发送、接收记录；CH372 不在支持范围 |
@@ -129,13 +130,13 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 porthelper-fluent/
 ├─ app/
 │  ├─ core/        # 纯 Python 算法：校验、编码、图像、字模、C51、配置、日志
-│  ├─ io/          # 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端
-│  ├─ services/    # 路径、导出、会话记录、Ping/DNS/网卡、在线更新（updates · updater_install）
-│  └─ ui/          # Fluent 窗口、页面、通用控件、对话框、主题、统一布局容器
+│  ├─ io/          # 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端、蓝牙后台任务（async_worker · ble_worker · spp_worker）
+│  ├─ services/    # 路径、导出、会话记录、Ping/DNS/网卡、蓝牙纯函数、在线更新（updates · updater_install）
+│  └─ ui/          # Fluent 窗口、页面（含蓝牙调试）、通用控件、对话框、主题、统一布局容器
 ├─ analysis/       # 逆向文字证据与解析脚本（原始二进制/图片资源不提交）
 ├─ build/          # PyInstaller spec、构建脚本、图标、版本信息
 ├─ docs/           # 架构、构建、使用、逆向说明、设计规格与实施计划
-├─ tests/          # pytest 测试（683 项）
+├─ tests/          # pytest 测试（748 项）
 ├─ main.py         # 应用入口与自检
 ├─ requirements.txt
 └─ pytest.ini
@@ -147,9 +148,9 @@ porthelper-fluent/
 flowchart TB
     UI["UI 层<br/>FluentWindow / 页面 / 控件 / 对话框"]
     SVC["服务层<br/>paths · settings · session_log · exports · net_tools"]
-    IO["IO 层<br/>serial_worker · hid_worker · net_client · net_server"]
+    IO["IO 层<br/>serial_worker · hid_worker · net_client · net_server · ble_worker · spp_worker"]
     CORE["核心层（Qt-free）<br/>encoding · checksum · color · imaging · fontmatrix · c51 · audio/gif/qr"]
-    WIN["Windows / 第三方<br/>pyserial · hidapi · Qt Network · Pillow · numpy · qrcode · ffmpeg"]
+    WIN["Windows / 第三方<br/>pyserial · hidapi · Qt Network · bleak · WinRT · Pillow · numpy · qrcode · ffmpeg"]
     FS[("AppData / 便携 data<br/>config.json · logs · 会话导出")]
 
     UI --> SVC
@@ -177,10 +178,10 @@ python -m pytest
 
 当前仓库状态：
 
-- **683 项测试通过**（pytest，离屏 Qt，无真实串口/HID 依赖）。
-- 覆盖校验已知向量、CRC 独立参考、8051 定时/波特率寄存器、RGB565/RGB332、扫描方向/字节序、字模位序/分页、配置损坏恢复、便携目录回退、TCP/UDP 回环、串口/HID 假传输、打包 selftest/smoke。
+- **748 项测试通过**（pytest，离屏 Qt，无真实串口/HID/蓝牙依赖）。
+- 覆盖校验已知向量、CRC 独立参考、8051 定时/波特率寄存器、RGB565/RGB332、扫描方向/字节序、字模位序/分页、配置损坏恢复、便携目录回退、TCP/UDP 回环、串口/HID 假传输、蓝牙 UUID/MTU 分片假设备、打包 selftest/smoke。
 - 打包后的 exe 在隔离 `APPDATA`、空 `PYTHONUSERBASE`/`PYTHONPATH` 的临时目录中通过 `--selftest` 与 `--smoke-test`。
-- 真实串口/HID 设备读写、Keil 打开生成的工程属于手工验收项。
+- 真实串口/HID/蓝牙设备读写、Keil 打开生成的工程属于手工验收项。
 
 ## 逆向工程说明
 
@@ -205,7 +206,6 @@ python -m pytest
 
 | 原功能 | 原因 |
 | --- | --- |
-| 蓝牙调试 | 原程序调用独立蓝牙助手 exe，依赖外部驱动与配对流程 |
 | 串口高级监视 | 依赖 32 位内核驱动，安装/卸载具有系统侵入性 |
 | CH372 / CH375 | 需要厂商 DLL，纯 Python 单文件无法可靠复刻 |
 | Keil 配色一键替换 | 会修改外部 Keil 配置，改为不做 |

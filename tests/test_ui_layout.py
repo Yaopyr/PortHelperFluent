@@ -139,7 +139,7 @@ def test_all_page_scroll_areas_are_fluent(window) -> None:
 
 
 def test_side_panels_use_shared_min_width(window) -> None:
-    for route in ("serial", "net-client", "net-server", "hid"):
+    for route in ("serial", "bluetooth", "net-client", "net-server", "hid"):
         splitter = window.pages[route].findChildren(QSplitter)[0]
         first = splitter.widget(0)
         assert first is not None, route

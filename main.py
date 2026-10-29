@@ -47,6 +47,9 @@ REQUIRED_MODULES = (
     "numpy",
     "hid",
     "qrcode",
+    "bleak",
+    "winrt.windows.devices.bluetooth.rfcomm",
+    "winrt.windows.networking.sockets",
 )
 
 # 异常提示桥接与类型都延迟创建，保证缺少 PyQt6 时 main 仍可导入（--selftest 依赖）。

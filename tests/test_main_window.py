@@ -30,10 +30,10 @@ def window(qapp, tmp_path: Path):
     main_window.close()
 
 
-def test_main_window_has_ten_pages_and_navigation_routes(window) -> None:
+def test_main_window_has_eleven_pages_and_navigation_routes(window) -> None:
     main_window, _settings, _paths = window
 
-    assert main_window.stackedWidget.count() == 10
+    assert main_window.stackedWidget.count() == 11
     assert tuple(main_window.pages) == PAGE_ROUTES
     for route in PAGE_ROUTES:
         page = main_window.findChild(QWidget, route)
@@ -180,6 +180,7 @@ def test_navigation_headers_and_labels_are_in_expected_order(window) -> None:
     ]
     assert labels == [
         "串口调试",
+        "蓝牙调试",
         "网络调试",
         "网络服务器",
         "USB HID",
@@ -219,7 +220,7 @@ def test_navigation_icons_are_unique() -> None:
     names = [spec[2] for _header, specs in _PAGE_SPECS for spec in specs]
     # 名称拼错时 icon_for() 会静默退回 FluentIcon.APPLICATION，必须比对解析结果。
     assert all(name in FluentIcon.__members__ for name in names)
-    assert len({icon_for(name) for name in names}) == len(PAGE_ROUTES) == 10
+    assert len({icon_for(name) for name in names}) == len(PAGE_ROUTES) == 11
 
 
 def test_close_in_no_dialogs_mode_skips_question_and_stops_workers(

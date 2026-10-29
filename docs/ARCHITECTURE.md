@@ -6,7 +6,7 @@
 
 1. **界面与协议解耦**：核心算法（校验、编码、图像、字模、C51）不导入 Qt，可在 pytest 中直接测试。
 2. **IO 与 UI 解耦**：串口/HID 的阻塞读写放在 `QThread`；网络使用 Qt 事件循环；页面只消费信号。
-3. **页面可替换**：主窗口只依赖 10 个页面的构造契约，页面内部可以独立演进。
+3. **页面可替换**：主窗口只依赖 11 个页面的构造契约，页面内部可以独立演进。
 4. **单文件交付**：PyInstaller onefile，不安装服务/驱动，不写注册表，不需要管理员权限。
 5. **失败可读**：所有用户可见错误使用中文「发生了什么 + 可能原因 + 下一步」，技术细节写日志。
 
@@ -17,10 +17,10 @@
 ```mermaid
 flowchart TB
     UI["ui/<br/>FluentWindow · 页面 · 控件 · 对话框"]
-    SVC["services/<br/>paths · settings · session_log · exports · net_tools<br/>updates · updater_install"]
-    IO["io/<br/>serial_worker · hid_worker · net_client · net_server"]
+    SVC["services/<br/>paths · settings · session_log · exports · net_tools<br/>bluetooth · updates · updater_install"]
+    IO["io/<br/>serial_worker · hid_worker · net_client · net_server<br/>async_worker · ble_worker · spp_worker"]
     CORE["core/（Qt-free）<br/>encoding · checksum · color · imaging · fontmatrix · c51 · audio/gif/qr"]
-    WIN["Windows / 第三方<br/>pyserial · hidapi · Qt Network · Pillow · numpy · qrcode · ffmpeg"]
+    WIN["Windows / 第三方<br/>pyserial · hidapi · Qt Network · bleak · WinRT · Pillow · numpy · qrcode · ffmpeg"]
     FS[("AppData / 便携 data")]
 
     UI --> SVC
@@ -35,7 +35,7 @@ flowchart TB
 | --- | --- | --- |
 | `app/core` | 纯算法、数据格式、配置模型、日志基础设施 | 导入 Qt、页面、IO |
 | `app/services` | 路径、配置持久化、会话记录、导出、Ping/DNS/网卡 | 导入页面 |
-| `app/io` | 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端 | 直接操作控件 |
+| `app/io` | 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端、蓝牙 BLE/SPP 后台任务 | 直接操作控件 |
 | `app/ui` | 窗口、页面、控件、对话框、主题、反馈 | 在页面内实现协议/算法 |
 
 > 已知偏差：`app/core/imaging.py` 与 `app/core/fontmatrix.py` 引用了 `app/services/exports.py` 的文件名/原子写入辅助函数。它们是 Qt-free 的，但严格来说 `core → services` 不是理想方向；后续可将这些纯文件工具下沉到 `core/files.py`。
@@ -66,6 +66,9 @@ flowchart TB
 | `hid_worker.py` | `HidBackend` 协议、hidapi 适配、`HidWorker(QThread)`、设备枚举 |
 | `net_client.py` | `NetClientController(QObject)`，TCP/UDP、异步域名、状态/错误信号 |
 | `net_server.py` | `NetServerController(QObject)`，监听、多客户端、广播、计数 |
+| `async_worker.py` | daemon 线程 + 私有 asyncio loop 的通用外壳：线程安全命令投递、信号回传、`stop()` 有限等待 |
+| `ble_worker.py` | `BleWorker(QObject)`，封装 `BleakScanner`/`BleakClient`：扫描、连接、服务、读/写、通知、MTU、断开 |
+| `spp_worker.py` | `SppWorker(QObject)`，封装 WinRT 设备枚举/配对/RFCOMM socket；COM 通道在内部持有 `SerialWorker` |
 | `update_worker.py` | daemon 线程 + QObject 信号的检查/下载任务（不阻塞界面、退出不阻塞进程） |
 
 ### services
@@ -76,6 +79,7 @@ flowchart TB
 | `exports.py` | 文件名清洗、唯一路径、原子写 |
 | `session_log.py` | 记录、字节/条数上限、生命周期计数、TXT/CSV 导出 |
 | `net_tools.py` | 系统 `ping.exe`、DNS、psutil 网卡信息、默认网关 |
+| `bluetooth.py` | 纯函数：SIG UUID 名称表、特征值属性解析、设备排序/过滤、MTU 分片、蓝牙 COM 口识别、PIN 校验、中文诊断提示 |
 | `updates.py` | GitHub Release 查询、版本比较、资产选择、https+白名单下载、SHA-256 校验 |
 | `updater_install.py` | 目标目录可写检测、备份、ASCII PowerShell 自替换脚本与重启 |
 
@@ -90,7 +94,7 @@ flowchart TB
 | `widgets/` | 日志面板、文件选择、HEX 输入、状态胶囊、卡片、矩阵视图 |
 | `widgets/page_layout.py` | 统一页面边距/间距、Fluent 纵向滚动容器、页面最小尺寸 1000×640、左右分栏侧栏最小宽 360 |
 | `dialogs/` | 会话记录、多项发送、文本信息、自定义 CRC |
-| `pages/` | 10 个页面；`convert/` 内含 7 个转换工具 |
+| `pages/` | 11 个页面；`convert/` 内含 7 个转换工具 |
 
 ## 线程与数据流
 
@@ -134,6 +138,31 @@ sequenceDiagram
 - `HidWorker(QThread)` 读循环 50 ms 超时；发送队列；报告 ID 可选，报告长度按 1–1024 补齐/截断。
 - 设备拔出或读写失败：发 `error`，关闭句柄，发 `closed`，页面自动复位。
 - 仅支持标准 HID；CH372/CH375 需要厂商 DLL，不在支持范围。
+
+### 蓝牙
+
+```mermaid
+sequenceDiagram
+    participant UI as BluetoothPage
+    participant W as BleWorker/SppWorker(QObject)
+    participant L as 私有 asyncio loop（daemon 线程）
+    participant D as bleak / WinRT
+    UI->>W: submit(factory)（线程安全投递）
+    W->>L: loop.call_soon_threadsafe(task)
+    L->>D: BleakScanner / BleakClient · RfcommDeviceService / StreamSocket
+    D-->>L: 协程结果
+    L-->>UI: 信号（device_found / connected / services_ready / notification / …）
+    UI->>W: shutdown()
+    L->>D: 取消任务、关闭客户端/socket
+    W-->>UI: finished
+```
+
+- 所有 bleak 与 WinRT 调用都只在 worker 线程的私有 asyncio loop 里执行；界面线程只用 `loop.call_soon_threadsafe` 下发指令，结果一律通过 Qt 信号回传，界面不会因为扫描/配对/连接卡住。
+- worker 不持有父对象（`parent=None`）由页面保活，`finished` 后清空引用；`stop_workers()` / `closeEvent` 会取消任务 → 关闭客户端或 socket → 停 loop → `join(≤3 s)`，重复调用安全。
+- 页面构造期间**零**蓝牙调用：worker 在首次扫描/连接时才创建，因此路由与布局测试不会触发任何扫描。
+- 同一时间只有一条活动连接。切换 BLE/SPP 模式或切换设备前先断开当前链路，并在日志插入系统分隔线说明断开原因；主动断开与异常断开都收敛成同一个 `disconnected(reason)` 信号，避免界面出现两种状态。
+- SPP 的 COM 备用通道复用 `SerialWorker`（`QThread`），由 `SppWorker` 把它的信号收敛进同一套信号；RFCOMM 与 COM 通道互斥。
+- 连接后 MTU 只读（Windows 系统协商，可刷新重读）；RSSI 只在扫描期间发出，连接后设备一般停止广播，界面标注停更。
 
 ### 日志
 
@@ -193,6 +222,7 @@ IO 信号 → LogPane.append_bytes()
 ## 打包
 
 - `build/app.spec`：PyInstaller onefile、windowed、图标、版本信息、qfluentwidgets 资源、hidapi/qrcode/Pillow/numpy/psutil/pyserial。
+- 蓝牙依赖用 `collect_submodules("bleak") + collect_submodules("winrt")` 显式收集：`winrt-*` 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩；`main.py` 的 `--selftest` 与 `build/build.ps1` 都会断言 `bleak`、`winrt.windows.devices.bluetooth.rfcomm`、`winrt.windows.networking.sockets` 三项可导入。
 - 排除 PyQt5、WebEngine、Quick/QML、3D、Multimedia、tkinter、matplotlib、scipy、pandas。
 - 不使用 UPX；不请求管理员权限。
 - `build/build.ps1`：测试 → 图标 → 打包 → 归档检查 → 临时目录 selftest/smoke → SHA/日志。
@@ -228,6 +258,7 @@ IO 信号 → LogPane.append_bytes()
 - 分栏比例、最近导出目录尚未全部记忆。
 - 日志方向仅用 `[RX]/[TX]` 前缀区分，未做逐行颜色。
 - 真实串口/HID/Keil 属手工验收，不在自动测试范围。
+- 蓝牙：BLE 的 MTU 与连接后的 RSSI 都只读（bleak 3 的 Windows 后端不提供 `request_mtu`/`get_rssi`），不能主动请求 MTU；SPP 依赖 WinRT（配对、RFCOMM），只在 Windows 10/11 可用，没有跨平台后端；不做删除配对、多设备并发与 BLE 固件升级。
 - 更新仅支持 GitHub 正式 Release，无增量更新与代码签名。
 
 这些是维护性/性能债务，不影响当前功能正确性。

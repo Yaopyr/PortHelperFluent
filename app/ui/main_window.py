@@ -26,6 +26,7 @@ from app.io.update_worker import UpdateCheckWorker
 from app.services.paths import AppPaths
 from app.services.updates import is_newer
 from app.ui.feedback import show_info
+from app.ui.pages.bluetooth_page import BluetoothPage
 from app.ui.pages.c51_page import C51Page
 from app.ui.pages.checksum_page import ChecksumPage
 from app.ui.pages.convert import ConvertPage
@@ -57,6 +58,7 @@ _PAGE_SPECS = (
         "通信",
         (
             ("serial", SerialPage, "CONNECT", "串口调试"),
+            ("bluetooth", BluetoothPage, "BLUETOOTH", "蓝牙调试"),
             ("net-client", NetClientPage, "GLOBE", "网络调试"),
             ("net-server", NetServerPage, "IOT", "网络服务器"),
             ("hid", HidPage, "GAME", "USB HID"),

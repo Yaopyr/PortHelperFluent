@@ -13,7 +13,7 @@ tests/ and .git/ are never included.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # SPECPATH points at the directory containing this spec (build/).
 BUILD_DIR = Path(SPECPATH)
@@ -50,6 +50,11 @@ hiddenimports = [
     "PIL.ImageSequence",
     "numpy",
 ]
+
+# bleak and the WinRT namespaces are imported lazily by the bluetooth workers
+# and the winrt-* implementation lives in .pyd files that modulegraph cannot
+# follow, so every submodule has to be collected explicitly.
+hiddenimports += collect_submodules("bleak") + collect_submodules("winrt")
 
 excludes = [
     "PyQt5",
