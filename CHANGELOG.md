@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
+## [1.1.2] - 2026-10-30
+
+修复串口无法打开：界面报「打开串口失败：'SerialPage' object has no attribute 'open'」。
+
+### Fixed
+
+- `SerialPage` 默认路径创建 `SerialWorker` 时误把页面对象当作第一个位置参数传入，而该参数是 `transport`，导致真实串口打开时 `transport.open()` 抛出 `AttributeError`；其他串口工具能正常连接的端口在本程序中也无法打开。
+- 生产路径改为 `SerialWorker(parent=self)`（关键字传参），注入 `worker_factory` 时保持原有「先传父对象、`TypeError` 再回退无参」契约；`SerialWorker` 签名未变。
+- `tests/test_serial_page.py` 新增回归测试 `test_default_worker_uses_pyserial_transport_not_page`，锁定默认构造路径的 transport 必须是 `PyserialTransport` 而不是页面对象。
+
+### Changed
+
+- 版本号升至 1.1.2（`app/__init__.py` 与 `build/version_info.txt` 同步）。
+
 ## [1.1.1] - 2026-10-30
 
 修复自动更新点击「Yes」后不替换 exe、旧版本重开的问题。

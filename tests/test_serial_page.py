@@ -8,7 +8,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtTest import QTest
 
 from app.core.settings import Settings
-from app.io.serial_worker import PortInfo
+from app.io.serial_worker import PortInfo, PyserialTransport, SerialWorker
 from app.services.paths import resolve_paths
 from app.ui.dialogs.multi_send_dialog import MultiSendDialog
 from app.ui.pages import serial_page as serial_page_module
@@ -330,4 +330,25 @@ def test_file_send_waits_for_write_ack_and_does_not_queue_whole_file(qapp, tmp_p
         assert page._file_handle is None
         assert "完成" in page.file_progress_label.text()
     finally:
+        page.close()
+
+
+def test_default_worker_uses_pyserial_transport_not_page(qapp, tmp_path, monkeypatch):
+    """默认构造路径不得把 page 当成 SerialWorker 的 transport 位置参数。"""
+    monkeypatch.setattr(serial_page_module, "list_ports", lambda: [])
+    settings = Settings(tmp_path / "config.json")
+    paths = resolve_paths(exe_path=tmp_path / "app", appdata=tmp_path / "appdata")
+    page = SerialPage(settings, paths)
+    page.show()
+    try:
+        worker = page._worker
+        assert isinstance(worker, SerialWorker)
+        transport = worker._transport
+        assert transport is not page
+        assert isinstance(transport, PyserialTransport)
+        for name in ("open", "close", "read", "write"):
+            assert callable(getattr(transport, name))
+        assert worker.parent() is page
+    finally:
+        page.stop_workers()
         page.close()

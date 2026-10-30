@@ -350,10 +350,16 @@ class SerialPage(QWidget):
             self.status_chip.set_state("error", "串口未初始化")
             return
         try:
-            try:
-                worker = self._worker_factory(self)
-            except TypeError:
-                worker = self._worker_factory()
+            if callable(self.worker_factory):
+                # 注入工厂的既有契约：优先传入父对象，不支持时再回退到无参调用。
+                try:
+                    worker = self._worker_factory(self)
+                except TypeError:
+                    worker = self._worker_factory()
+            else:
+                # 生产路径：SerialWorker 的第一个位置参数是 transport，
+                # 必须用关键字传入 parent，否则 page 会被当成 transport。
+                worker = SerialWorker(parent=self)
         except Exception as exc:
             get_logger().exception("创建串口工作对象失败")
             self.status_chip.set_state("error", "串口不可用")
