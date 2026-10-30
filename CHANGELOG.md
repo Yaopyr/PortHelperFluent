@@ -2,6 +2,24 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
+## [1.1.1] - 2026-10-30
+
+修复自动更新点击「Yes」后不替换 exe、旧版本重开的问题。
+
+### Fixed
+
+- 在线更新安装脚本改用 `CREATE_NO_WINDOW`（隐藏的新控制台）启动 PowerShell，不再使用 `DETACHED_PROCESS`：完全没有控制台的 `powershell.exe`（5.1）会静默退出（退出码 0）且一行脚本都不执行，表现为「确认安装后程序关闭、约一分钟后旧版本重开、`updates` 目录没有 `update.log`」。
+- 保留 `CREATE_NEW_PROCESS_GROUP`，安装脚本仍然是独立进程，主程序退出后继续等待解锁、原子替换 exe 并重启新版本。
+- `tests/test_update_install.py` 增加回归断言：启动标志必须包含 `CREATE_NO_WINDOW` 且不得再出现 `DETACHED_PROCESS`。
+
+### Changed
+
+- 版本号升至 1.1.1（`app/__init__.py` 与 `build/version_info.txt` 同步）。
+
+### Note
+
+- 1.0.0 / 1.0.1 / 1.1.0 内置的更新器都带此缺陷，无法自行升级到本版本，需手动替换一次 exe；之后的自动更新恢复正常。
+
 ## [1.1.0] - 2026-10-29
 
 新增「蓝牙调试」页面：同时覆盖 BLE 与经典蓝牙 SPP，一页完成扫描、配对、收发。

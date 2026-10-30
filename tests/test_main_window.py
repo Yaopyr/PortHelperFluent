@@ -41,7 +41,7 @@ def test_main_window_has_eleven_pages_and_navigation_routes(window) -> None:
         assert main_window.navigationInterface.widget(route) is not None, route
 
     assert main_window.stackedWidget.currentWidget().objectName() == "serial"
-    assert main_window.windowTitle() == f"{APP_TITLE} 1.1.0"
+    assert main_window.windowTitle() == f"{APP_TITLE} 1.1.1"
     assert main_window.minimumWidth() == 1180
     assert main_window.minimumHeight() == 760
     assert main_window.smoke_test() is True
@@ -377,7 +377,7 @@ def test_app_version_has_single_source(window) -> None:
 
     main_window, _settings, _paths = window
 
-    assert app.APP_VERSION == main.APP_VERSION == DEFAULT_SETTINGS["app.version"] == "1.1.0"
+    assert app.APP_VERSION == main.APP_VERSION == DEFAULT_SETTINGS["app.version"] == "1.1.1"
     assert main_window.windowTitle() == f"{APP_TITLE} {app.APP_VERSION}"
 
 

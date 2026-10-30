@@ -1,10 +1,14 @@
 """Windows 自替换安装：生成 PowerShell 脚本，退出后替换 exe 并重启。
 
-应用自身无法覆盖正在运行的 exe，因此先写一个脚本，再用 `DETACHED_PROCESS` 启动
-独立进程执行：等待旧进程退出 → 用 `[System.IO.File]::Replace` 原子替换目标 → 写
-`update.log` → 重启新版本；`File.Replace` 要求源与目标同卷，跨卷等失败时退回
-`Copy-Item -Force`（同样不在目标目录产生旁路文件）。替换失败时用备份还原目标并
-重启旧版。
+应用自身无法覆盖正在运行的 exe，因此先写一个脚本，再用 `CREATE_NO_WINDOW`
+（独立控制台、无窗口）启动 PowerShell 执行：等待旧进程退出 → 用
+`[System.IO.File]::Replace` 原子替换目标 → 写 `update.log` → 重启新版本；
+`File.Replace` 要求源与目标同卷，跨卷等失败时退回 `Copy-Item -Force`（同样不在
+目标目录产生旁路文件）。替换失败时用备份还原目标并重启旧版。
+
+注意不要改回 `DETACHED_PROCESS`：完全没有控制台的 powershell.exe（5.1）会静默
+退出（退出码 0）且一行脚本都不执行，表现为“点了 Yes 后程序关闭、旧版重开”。
+`CREATE_NO_WINDOW` 给脚本一个隐藏的新控制台，脚本放行后能脱离本进程继续运行。
 
 onefile 打包的程序有 bootloader 父进程 + Python 子进程，`os.getpid()` 只是子进程
 的 pid：子进程先退出时父进程仍映射着 exe（还要清理 `_MEI`），此时替换必然失败。
@@ -37,8 +41,8 @@ UPDATE_LOG_NAME = "update.log"
 BACKUP_PREFIX = "backup-PortHelperFluent-"
 UPDATE_LOG_MAX_BYTES = 1024 * 1024
 
-# subprocess 的这两个常量只在 Windows 上定义，非 Windows 解释器用数值兜底。
-_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+# subprocess 的这些常量只在 Windows 上定义，非 Windows 解释器用数值兜底。
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 _POWERSHELL_ARGS = (
     "powershell",
@@ -221,7 +225,7 @@ def install_update(
     try:
         popen(
             command,
-            creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP,
+            creationflags=_CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP,
             close_fds=True,
         )
     except OSError as exc:

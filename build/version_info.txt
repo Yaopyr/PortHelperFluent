@@ -1,10 +1,10 @@
 # UTF-8
-# Windows 文件版本资源：版本 1.1.0，产品名 PortHelper Fluent。
+# Windows 文件版本资源：版本 1.1.1，产品名 PortHelper Fluent。
 # 中英文两张字符串表便于资源管理器在中英文系统下都能正确显示。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(1, 1, 1, 0),
+    prodvers=(1, 1, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -20,12 +20,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'Independent reimplementation'),
             StringStruct('FileDescription', 'PortHelper Fluent - independent Python reimplementation'),
-            StringStruct('FileVersion', '1.1.0'),
+            StringStruct('FileVersion', '1.1.1'),
             StringStruct('InternalName', 'PortHelperFluent'),
             StringStruct('LegalCopyright', 'Independent Python reimplementation; no original program resources included.'),
             StringStruct('OriginalFilename', 'PortHelperFluent.exe'),
             StringStruct('ProductName', 'PortHelper Fluent'),
-            StringStruct('ProductVersion', '1.1.0'),
+            StringStruct('ProductVersion', '1.1.1'),
             StringStruct('Comments', 'Referenced PortHelper V1.8.8 functionality only; independently implemented in Python.')
           ]
         ),
@@ -34,12 +34,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', '独立复刻项目'),
             StringStruct('FileDescription', 'PortHelper Fluent 串口/网络调试助手（独立 Python 复刻）'),
-            StringStruct('FileVersion', '1.1.0'),
+            StringStruct('FileVersion', '1.1.1'),
             StringStruct('InternalName', 'PortHelperFluent'),
             StringStruct('LegalCopyright', '独立 Python 复刻，不包含原程序资源'),
             StringStruct('OriginalFilename', 'PortHelperFluent.exe'),
             StringStruct('ProductName', 'PortHelper Fluent'),
-            StringStruct('ProductVersion', '1.1.0'),
+            StringStruct('ProductVersion', '1.1.1'),
             StringStruct('Comments', '功能参考 PortHelper V1.8.8（温子祺），本项目为独立 Python 复刻。')
           ]
         )

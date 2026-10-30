@@ -116,7 +116,9 @@ def test_install_update_backs_up_and_launches_script(tmp_path: Path, monkeypatch
     assert "-ExecutionPolicy" in command
     assert str(script) in command
     assert kwargs["close_fds"] is True
-    assert kwargs["creationflags"] & 0x00000008  # DETACHED_PROCESS
+    # 必须是 CREATE_NO_WINDOW：DETACHED_PROCESS 下 powershell 会静默退出、脚本不执行。
+    assert kwargs["creationflags"] & 0x08000000  # CREATE_NO_WINDOW
+    assert not kwargs["creationflags"] & 0x00000008  # DETACHED_PROCESS 不得再出现
     # 备份、脚本与日志都只写在 work_dir，exe 目录不新增任何文件。
     assert [path.name for path in target.parent.iterdir()] == ["PortHelperFluent.exe"]
 
