@@ -44,6 +44,15 @@ BAUD_KEYS = {
 KEIL_FILES = {"Main.c", "M51Project.Uv2", "M51Project.Opt", "STARTUP.A51"}
 
 
+def _strict_json(text: str) -> dict:
+    """用拒绝 NaN/Infinity 的解析器读信封，确保 stdout 是标准 JSON。"""
+
+    def _reject(token: str) -> None:
+        raise AssertionError(f"stdout 出现非标准 JSON 常量 {token}")
+
+    return json.loads(text, parse_constant=_reject)
+
+
 # ---------------------------------------------------------------------------
 # show-config
 # ---------------------------------------------------------------------------
@@ -223,6 +232,44 @@ def test_missing_config_file_is_not_found(cli, tmp_path) -> None:
     payload = cli(["c51", "calc", "--config", str(tmp_path / "nope.json")])
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "not_found"
+
+
+def test_non_finite_numbers_are_invalid_input(capsys) -> None:
+    """``json.loads`` 默认接受 NaN/Infinity；它们会让信封不再是标准 JSON。"""
+    from app.cli.main import run
+
+    for literal in ("NaN", "Infinity", "-Infinity", "1e999"):
+        assert run(["c51", "calc", "--config-json", f'{{"crystal_mhz": {literal}}}']) == 3
+        payload = _strict_json(capsys.readouterr().out)
+        assert payload["ok"] is False, literal
+        assert payload["error"]["code"] == "invalid_input", literal
+        assert "有限" in payload["error"]["message"], literal
+
+
+def test_bad_config_content_from_file_and_stdin(cli, tmp_path, monkeypatch) -> None:
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    payload = cli(["c51", "calc", "--config", str(broken)])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "invalid_input"
+
+    nan_file = tmp_path / "nan.json"
+    nan_file.write_text('{"crystal_mhz": NaN}', encoding="utf-8")
+    payload = cli(["c51", "calc", "--config", str(nan_file)])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "invalid_input"
+
+    # stdin 与文件走同一条解析路径：坏 JSON 与 NaN 都必须被拦下。
+    for content in ('{"crystal_mhz": NaN}', "{not json"):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(content))
+        payload = cli(["c51", "calc", "--config", "-"])
+        assert payload["exit_code"] == 3, content
+        assert payload["error"]["code"] == "invalid_input", content
+
+    # 有限小数仍按原行为解析，拦截不能误伤正常配置。
+    payload = cli(["c51", "calc", "--config-json", '{"crystal_mhz": 12.5}'])
+    assert payload["exit_code"] == 0
+    assert payload["data"]["config"]["crystal_mhz"] == 12.5
 
 
 def test_write_failures_are_permission_denied(cli, tmp_path) -> None:

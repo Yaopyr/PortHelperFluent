@@ -16,9 +16,10 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from app.cli.errors import EXIT_OPERATION, CliError
 from app.cli.output import add_output_options
@@ -256,12 +257,13 @@ def _read_stdin() -> str:
 
 
 def _config_from_json(text: str, label: str) -> C51Config:
-    """JSON 文本 → :class:`C51Config`；语法错误或不是对象都按输入非法（3）。"""
+    """JSON 文本 → :class:`C51Config`；语法错误、非有限数值或不是对象都按输入非法（3）。"""
     try:
-        data = json.loads(text)
+        data = json.loads(text, parse_constant=_reject_constant)
+        _ensure_finite(data)
     except ValueError as exc:
         raise CliError(
-            "invalid_input", f"{label}无法解析为 JSON：{exc}", EXIT_OPERATION
+            "invalid_input", f"{label} 无效：{exc}", EXIT_OPERATION
         ) from exc
     if not isinstance(data, dict):
         raise CliError(
@@ -270,6 +272,27 @@ def _config_from_json(text: str, label: str) -> C51Config:
             EXIT_OPERATION,
         )
     return C51Config.from_dict(data)
+
+
+def _reject_constant(token: str) -> NoReturn:
+    """拒绝 ``NaN``/``Infinity``/``-Infinity``：Python 的 ``json`` 默认接受它们。
+
+    ``C51Config.from_dict`` 不会拦下 NaN（比较结果为假，钳位后原样保留），
+    一旦写进信封，stdout 就不再是标准 JSON。
+    """
+    raise ValueError(f"出现不支持的数值常量 {token}（配置只接受有限数值）")
+
+
+def _ensure_finite(value: Any) -> None:
+    """递归拒绝非有限浮点数：覆盖 ``1e999`` 这类溢出成 inf 的标准数字字面量。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"出现非有限数值 {value}（配置只接受有限数值）")
+    if isinstance(value, dict):
+        for item in value.values():
+            _ensure_finite(item)
+    elif isinstance(value, list):
+        for item in value:
+            _ensure_finite(item)
 
 
 def _write_text(path_value: str, text: str, label: str) -> None:
