@@ -1,8 +1,10 @@
-"""``serial`` 命令组：端口枚举、单次发送与调制解调器线状态读取。
+"""``serial`` 命令组：端口枚举、单次发送、有界流式监控与调制解调器线状态读取。
 
 - ``list``：枚举串口，可按 device/description/hwid 的子串过滤；
 - ``send``：打开串口 → 可选 DTR/RTS → 可选 BREAK → 按 ``--repeat`` 写入 →
   按 ``--expect``/``--read-for`` 读取 → 关闭；
+- ``monitor``：打开串口后循环读取，按 NDJSON 输出 ``start``/``data``/``end`` 事件，
+  由 ``--duration``/``--max-bytes``/``--max-events``/``--until`` 保证有界；
 - ``modem``：打开、读取四个线状态、立即关闭。
 
 复用 :mod:`app.io.serial_worker` 的 ``SerialConfig``/``PyserialTransport``/``list_ports``，
@@ -14,14 +16,20 @@ from __future__ import annotations
 
 import math
 import time
+from datetime import datetime
 from typing import Any
 
 from app.cli.errors import EXIT_EXPECT, EXIT_OPERATION, EXIT_USAGE, CliError
 from app.cli.inputs import add_input_options, read_input
-from app.cli.output import add_output_options
-from app.cli.reads import make_matcher, read_until
+from app.cli.output import add_output_options, emit_event
+from app.cli.reads import (
+    add_stream_options,
+    make_matcher,
+    read_stream_options,
+    read_until,
+)
 from app.cli.transports import serial_io
-from app.core.encoding import decode_bytes
+from app.core.encoding import decode_bytes, resolve_codec
 
 __all__ = [
     "add_connection_options",
@@ -29,11 +37,16 @@ __all__ = [
     "register",
     "run_list",
     "run_modem",
+    "run_monitor",
     "run_send",
 ]
 
 # 串口单次 ``read`` 的上界；等待窗口由 ``--timeout``/``--read-for`` 约束。
 READ_CHUNK = 4096
+
+# 流式监控的轮询窗口与单次读取上界：单次 read 最多越过截止时间 ``MONITOR_POLL``。
+MONITOR_CHUNK = 256
+MONITOR_POLL = 0.05
 
 _LINE_ENDINGS = {
     "none": b"",
@@ -53,11 +66,12 @@ def register(subparsers) -> None:
         "serial",
         help="串口：端口枚举、发送并等待回包、读取调制解调器线状态。",
         description="直接使用 pyserial transport，不启动 GUI 工作线程；"
-        "可用子命令：list、send、modem。",
+        "可用子命令：list、send、monitor、modem。",
     )
     group = parser.add_subparsers(title="子命令", metavar="<action>")
     _register_list(group)
     _register_send(group)
+    _register_monitor(group)
     _register_modem(group)
 
 
@@ -339,6 +353,153 @@ def _received_data(raw: bytes, encoding: str) -> dict[str, Any]:
         "text": decode_bytes(raw, encoding),
         "size": len(raw),
     }
+
+
+# ---------------------------------------------------------------------------
+# monitor
+# ---------------------------------------------------------------------------
+
+
+def _register_monitor(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "monitor",
+        help="持续接收串口数据，按 NDJSON 输出事件（有界）。",
+        description="打开串口后循环读取，逐行输出 start/data/end 事件；"
+        "必须用 --duration 限定运行时长，可用 --max-bytes/--max-events/--until 提前结束。",
+    )
+    parser.add_argument("--port", required=True, metavar="PORT", help="串口名称，如 COM9。")
+    add_connection_options(parser)
+    add_stream_options(parser)
+    add_output_options(parser)
+    parser.set_defaults(handler=run_monitor, command="serial.monitor")
+
+
+def run_monitor(args) -> dict[str, Any]:
+    """流式读取串口并输出 NDJSON，返回 ``duration_s``/``bytes``/``events``/``matched``。"""
+    if str(getattr(args, "format", "json")) == "text":
+        raise CliError(
+            "usage",
+            "流式命令固定输出 NDJSON，不支持 --format text。",
+            EXIT_USAGE,
+        )
+    if bool(getattr(args, "pretty", False)):
+        raise CliError(
+            "usage",
+            "流式命令固定输出 NDJSON，不支持 --pretty。",
+            EXIT_USAGE,
+        )
+
+    options = read_stream_options(args)
+    encoding = str(getattr(args, "encoding", None) or "utf-8")
+    try:
+        codec = resolve_codec(encoding)
+    except ValueError as exc:
+        raise CliError("usage", str(exc), EXIT_USAGE) from exc
+    matcher = make_matcher(
+        expect=options.until, expect_hex=options.until_hex, encoding=codec
+    )
+    config = build_config(args)
+
+    clock = time.monotonic
+    started = clock()
+    deadline = started + options.duration
+    buffer = bytearray()
+    total = 0
+    events = 0
+    matched = False
+    transport = None
+    try:
+        transport = _new_transport(config)
+        _open(transport, config)
+        emit_event(
+            {
+                "event": "start",
+                "port": config.port,
+                "config": _config_summary(config),
+                "at": _timestamp(),
+            }
+        )
+        while True:
+            # 每一轮（包括空块）都重新检查截止时间，保证不会越界等待。
+            remaining = deadline - clock()
+            if remaining <= 0:
+                break
+            try:
+                chunk = transport.read(MONITOR_CHUNK, min(MONITOR_POLL, remaining))
+            except CliError:
+                raise
+            except Exception as exc:
+                error = CliError(
+                    "device_unavailable",
+                    f"读取串口 {config.port} 失败：{exc}",
+                    EXIT_OPERATION,
+                )
+                emit_event(
+                    {
+                        "event": "error",
+                        "code": error.code,
+                        "message": error.message,
+                        "at": _timestamp(),
+                    }
+                )
+                raise error from exc
+
+            if options.max_bytes is not None:
+                budget = options.max_bytes - total
+                if len(chunk) > budget:
+                    chunk = chunk[:budget]
+            if not chunk:
+                continue
+
+            buffer.extend(chunk)
+            total += len(chunk)
+            events += 1
+            emit_event(
+                {
+                    "event": "data",
+                    "hex": chunk.hex(),
+                    "text": decode_bytes(chunk, codec),
+                    "size": len(chunk),
+                    "at": _timestamp(),
+                }
+            )
+
+            if matcher is not None and matcher(bytes(buffer)):
+                matched = True
+                break
+            if options.max_bytes is not None and total >= options.max_bytes:
+                break
+            if options.max_events is not None and events >= options.max_events:
+                break
+    finally:
+        if transport is not None:
+            _close(transport)
+
+    summary = {
+        "duration_s": round(max(clock() - started, 0.0), 3),
+        "bytes": total,
+        "events": events,
+        "matched": matched,
+    }
+    emit_event({"event": "end", **summary, "at": _timestamp()})
+    return summary
+
+
+def _config_summary(config) -> dict[str, Any]:
+    """连接参数的对外摘要，键名与 CLI 参数一致。"""
+    return {
+        "baud": config.baud,
+        "data_bits": config.bytesize,
+        "stop_bits": config.stopbits,
+        "parity": config.parity,
+        "flow": config.flow,
+        "encoding": config.encoding,
+    }
+
+
+def _timestamp() -> str:
+    """本地时区的 ISO 8601 时间戳，供流式事件的 ``at`` 字段使用。"""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
