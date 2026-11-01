@@ -27,6 +27,9 @@ __all__ = ["register", "run_audio", "run_gif", "run_qr"]
 # 与 ``app.core.qr_tools.EC_LEVELS`` 的键保持一致（硬编码以保持导入轻量）。
 EC_LEVELS = ("L", "M", "Q", "H")
 
+# ``--name`` 带这些后缀时先去掉，保证文件主名与 C 标识符一致（同 image/dotmatrix）。
+_NAME_SUFFIXES = (".c", ".h", ".bin", ".wav", ".mp3")
+
 
 def register(subparsers) -> None:
     """把 ``gif``/``audio``/``qr`` 三个媒体子命令挂到 ``convert`` 的子命令解析器上。"""
@@ -75,7 +78,7 @@ def _register_gif(subparsers) -> None:
 
 
 def run_gif(args) -> dict[str, Any]:
-    """拆出所有帧并写出 BMP，返回 ``frames``/``width``/``height``/``files``。"""
+    """拆出所有帧并写出 BMP，返回 ``frames``/``width``/``height``/``size``/``files``。"""
     from app.core.gif_tools import export_frames, load_gif
 
     source = Path(getattr(args, "file"))
@@ -102,6 +105,8 @@ def run_gif(args) -> dict[str, Any]:
         "frames": len(frames),
         "width": width,
         "height": height,
+        # 实际写出的 BMP 尺寸：--width/--height 可能缩放，源尺寸不能代表输出大小。
+        "size": _exported_size(files[0]),
         "files": [str(path) for path in files],
     }
 
@@ -152,7 +157,7 @@ def run_audio(args) -> dict[str, Any]:
 
     source = Path(getattr(args, "file"))
     out_dir = Path(getattr(args, "out_dir"))
-    name = str(getattr(args, "name", None) or source.stem or "audio")
+    name = _strip_name_suffixes(getattr(args, "name", None), source.stem or "audio")
     max_samples = getattr(args, "max_samples", None)
     try:
         audio = load_audio(source)
@@ -282,3 +287,22 @@ def _load_error(source: Path, exc: ValueError) -> CliError:
     """
     code = "not_found" if not source.is_file() else "invalid_input"
     return CliError(code, str(exc), EXIT_OPERATION)
+
+
+def _exported_size(path: Path) -> dict[str, int]:
+    """读回第一张写出的 BMP 得到实际输出尺寸（缩放规则仍只由核心层实现）。"""
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return {"width": image.width, "height": image.height}
+
+
+def _strip_name_suffixes(name: str | None, fallback: str) -> str:
+    """``--name`` 去掉已知导出/音频后缀，空结果回落到输入 stem，避免 ``tone.wav.c``。"""
+    requested = str(name).strip() if name is not None else ""
+    lowered = requested.casefold()
+    for suffix in _NAME_SUFFIXES:
+        if lowered.endswith(suffix):
+            requested = requested[: -len(suffix)].rstrip(" .")
+            break
+    return requested or fallback

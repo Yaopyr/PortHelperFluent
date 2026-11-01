@@ -18,7 +18,7 @@ from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-GIF_DATA_KEYS = {"frames", "width", "height", "files"}
+GIF_DATA_KEYS = {"frames", "width", "height", "size", "files"}
 AUDIO_DATA_KEYS = {
     "sample_rate",
     "channels",
@@ -83,6 +83,8 @@ def test_gif_exports_frames(cli, tmp_path) -> None:
     assert set(data) == GIF_DATA_KEYS
     assert data["frames"] == 2
     assert data["width"] == 4 and data["height"] == 4
+    # 未缩放时 size 与源尺寸一致，但它是“实际写出的 BMP 尺寸”。
+    assert data["size"] == {"width": 4, "height": 4}
     assert [Path(path).name for path in data["files"]] == ["anim_0001.bmp", "anim_0002.bmp"]
     for path in data["files"]:
         assert Path(path).suffix == ".bmp"
@@ -110,9 +112,14 @@ def test_gif_stem_and_scaled_size(cli, tmp_path) -> None:
         "renamed_0001.bmp",
         "renamed_0002.bmp",
     ]
+    # 缩放后的实际输出尺寸必须出现在 data 里，Agent 不必再打开 BMP 才知道大小。
+    assert data["size"] == {"width": 4, "height": 2}
+    # 源尺寸仍是 GIF 原始尺寸。
+    assert data["width"] == 8 and data["height"] == 4
     with Image.open(data["files"][0]) as image:
         # 只给宽度时按原图比例缩放：8×4 → 4×2。
         assert image.size == (4, 2)
+        assert _image_size(image.size) == data["size"]
 
 
 def test_gif_missing_file_is_not_found(cli, tmp_path) -> None:
@@ -210,6 +217,31 @@ def test_wav_default_name_and_max_samples(cli, tmp_path) -> None:
     assert data["files"] == [str(out_dir / "voice.c"), str(out_dir / "voice.h")]
     # 截断后宏取实际导出的采样点数，而不是原始总数。
     assert "#define VOICE_LENGTH 4u" in (out_dir / "voice.c").read_text(encoding="utf-8")
+
+
+def test_audio_name_strips_known_suffixes(cli, tmp_path) -> None:
+    """``--name tone.wav`` 与 image/dotmatrix 的约定一致：去掉后缀，不生成 tone.wav.c。"""
+    source = _write_wav(tmp_path / "voice.wav", sample_count=8, rate=8000, width=2)
+    out_dir = tmp_path / "out"
+    data = cli(
+        [
+            "convert",
+            "audio",
+            "--file",
+            str(source),
+            "--out-dir",
+            str(out_dir),
+            "--name",
+            "tone.wav",
+        ]
+    )["data"]
+    assert data["files"] == [str(out_dir / "tone.c"), str(out_dir / "tone.h")]
+    assert not (out_dir / "tone.wav.c").exists()
+    assert not (out_dir / "tone.wav.h").exists()
+    # 文件名主名与 C 标识符保持一致（tone，而不是 tone_wav）。
+    c_text = (out_dir / "tone.c").read_text(encoding="utf-8")
+    assert "#define TONE_SAMPLE_RATE 8000u" in c_text
+    assert "const unsigned char tone[]" in c_text
 
 
 def test_unsupported_audio_returns_invalid_input(cli, tmp_path) -> None:
