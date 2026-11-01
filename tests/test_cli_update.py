@@ -66,6 +66,11 @@ def _freeze(monkeypatch) -> None:
     monkeypatch.setattr(sys, "frozen", True, raising=False)
 
 
+def _allow_replace(monkeypatch, ok: bool = True) -> None:
+    """替换 ``can_replace``：测试跑在 python.exe 上，真实程序目录与 exe 不可控。"""
+    monkeypatch.setattr(update, "can_replace", lambda target: ok)
+
+
 def _fake_download(monkeypatch, work_dirs: list[Path] | None = None) -> None:
     """把 ``download_release`` 换成“写一个假 exe 并返回路径”的假实现。"""
 
@@ -169,7 +174,7 @@ def test_download_maps_update_error(cli, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_install_requires_yes_and_exactly_one_source(cli, tmp_path) -> None:
+def test_install_requires_yes_and_exactly_one_source(cli, monkeypatch, tmp_path) -> None:
     exe = tmp_path / "PortHelperFluent-9.9.9.exe"
     exe.write_bytes(b"fake-exe")
     digest = hashlib.sha256(b"fake-exe").hexdigest()
@@ -179,6 +184,8 @@ def test_install_requires_yes_and_exactly_one_source(cli, tmp_path) -> None:
         ["update", "install", "--latest"],
         ["update", "install", "--latest", "--file", str(exe), "--sha256", digest],
         ["update", "install", "--yes", "--file", str(exe)],  # --file 必须配 --sha256
+        # --latest 的期望值来自 Release，不接受调用方再指定 --sha256。
+        ["update", "install", "--yes", "--latest", "--sha256", digest],
     ):
         payload = cli(argv)
         assert payload["exit_code"] == 2, argv
@@ -217,6 +224,7 @@ def test_install_rejects_source_mode(cli, monkeypatch, tmp_path) -> None:
 
 def test_install_file_must_exist(cli, monkeypatch, tmp_path) -> None:
     _freeze(monkeypatch)
+    monkeypatch.setattr(update, "fetch_latest_release", lambda: pytest.fail("--file 不应联网"))
 
     missing = tmp_path / "missing.exe"
     payload = cli(["update", "install", "--yes", "--file", str(missing), "--sha256", "0" * 64])
@@ -228,6 +236,7 @@ def test_install_file_sha_mismatch(cli, monkeypatch, tmp_path) -> None:
     _freeze(monkeypatch)
     calls: list[object] = []
     monkeypatch.setattr(update, "install_update", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(update, "fetch_latest_release", lambda: pytest.fail("--file 不应联网"))
 
     exe = tmp_path / "PortHelperFluent-9.9.9.exe"
     exe.write_bytes(b"fake-exe")
@@ -238,6 +247,24 @@ def test_install_file_sha_mismatch(cli, monkeypatch, tmp_path) -> None:
     assert calls == []
 
 
+def test_install_rejects_unwritable_program_dir(cli, monkeypatch, tmp_path) -> None:
+    """程序目录不可写时脚本必然失败：提前按 permission_denied 拒绝，不生成脚本。"""
+    _freeze(monkeypatch)
+    _allow_replace(monkeypatch, ok=False)
+    calls: list[object] = []
+    monkeypatch.setattr(update, "install_update", lambda *a, **k: calls.append(a))
+
+    exe = tmp_path / "PortHelperFluent-9.9.9.exe"
+    exe.write_bytes(b"fake-exe")
+    digest = hashlib.sha256(b"fake-exe").hexdigest()
+
+    payload = cli(["update", "install", "--yes", "--file", str(exe), "--sha256", digest])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "permission_denied"
+    assert "程序目录不可写" in payload["error"]["message"]
+    assert calls == []
+
+
 # ---------------------------------------------------------------------------
 # install：成功路径（不真的启动 PowerShell）
 # ---------------------------------------------------------------------------
@@ -245,7 +272,9 @@ def test_install_file_sha_mismatch(cli, monkeypatch, tmp_path) -> None:
 
 def test_install_file_runs_install_update(cli, monkeypatch, tmp_path) -> None:
     _freeze(monkeypatch)
+    _allow_replace(monkeypatch)
     monkeypatch.setattr(update, "fetch_latest_release", lambda: pytest.fail("--file 不应联网"))
+    monkeypatch.chdir(tmp_path)
 
     exe = tmp_path / "PortHelperFluent-9.9.9.exe"
     exe.write_bytes(b"fake-exe")
@@ -259,14 +288,15 @@ def test_install_file_runs_install_update(cli, monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(update, "install_update", fake_install)
 
-    payload = cli(["update", "install", "--yes", "--file", str(exe), "--sha256", digest])
+    payload = cli(["update", "install", "--yes", "--file", exe.name, "--sha256", digest])
     assert payload["exit_code"] == 0
     assert payload["command"] == "update.install"
     assert payload["data"] == {"script": str(calls[0][2] / "apply-update.ps1")}
 
     assert len(calls) == 1
     new_exe, target, work_dir, pid = calls[0]
-    assert new_exe == exe
+    # 相对路径必须解析成绝对路径：独立运行的 PowerShell 脚本不依赖 CLI 的 cwd。
+    assert new_exe.is_absolute() and new_exe == exe.resolve()
     assert target == Path(sys.executable)
     assert work_dir.name == "updates" and work_dir.is_dir()
     assert pid == os.getpid()
@@ -274,6 +304,7 @@ def test_install_file_runs_install_update(cli, monkeypatch, tmp_path) -> None:
 
 def test_install_latest_downloads_then_installs(cli, monkeypatch) -> None:
     _freeze(monkeypatch)
+    _allow_replace(monkeypatch)
     work_dirs: list[Path] = []
     downloaded: list[Path] = []
     monkeypatch.setattr(update, "fetch_latest_release", lambda: _release())

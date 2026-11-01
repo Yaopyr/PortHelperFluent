@@ -6,7 +6,8 @@
 - ``check``：只读，返回当前/最新版本与是否更新，附 Release 标题、说明与资产信息；
 - ``download``：把 exe 下载到 ``data_dir/updates`` 并返回路径、大小与 SHA-256；
 - ``install``：破坏性操作，必须 ``--yes``；``--file`` 不联网、只校验已下载的文件，
-  ``--latest`` 先检查并下载；源码运行（无 ``sys.frozen``）拒绝替换，只提示下载。
+  ``--latest`` 先检查并下载；源码运行（无 ``sys.frozen``）拒绝替换，只提示下载；
+  程序目录不可写（``can_replace`` 为假）同样拒绝，避免脚本静默失败。
 
 测试与 Agent 调用都不应真的启动 PowerShell：替换脚本由 ``install_update`` 生成，
 本模块只把脚本路径原样返回。
@@ -23,7 +24,7 @@ from app import APP_VERSION
 from app.cli.errors import EXIT_OPERATION, EXIT_USAGE, CliError
 from app.cli.output import add_output_options
 from app.services.paths import AppPaths, ensure_writable_paths, resolve_paths
-from app.services.updater_install import install_update
+from app.services.updater_install import can_replace, install_update
 from app.services.updates import (
     ReleaseInfo,
     UpdateError,
@@ -164,7 +165,9 @@ def run_install(args) -> dict[str, Any]:
     """校验参数与文件后生成替换脚本，返回 ``script``。
 
     ``--yes`` 与来源二选一是参数门槛；源码运行只下载不替换，因此先于文件读取
-    按 ``unsupported`` 拒绝，避免下载或校验做了也白做。
+    按 ``unsupported`` 拒绝，避免下载或校验做了也白做。文件准备好后还要过
+    :func:`can_replace`：程序目录不可写时脚本只会失败并写进 update.log，提前按
+    ``permission_denied`` 拒绝更直接。
     """
     if not getattr(args, "yes", False):
         raise CliError(
@@ -187,6 +190,12 @@ def run_install(args) -> dict[str, Any]:
             "--file 必须同时提供 --sha256（update download 会在 data.sha256 返回该值）。",
             EXIT_USAGE,
         )
+    if use_latest and sha256_arg:
+        raise CliError(
+            "usage",
+            "--latest 不接受 --sha256：期望值取自 Release 的 digest 或 SHA256.txt。",
+            EXIT_USAGE,
+        )
     if not getattr(sys, "frozen", False):
         raise CliError("unsupported", "源码运行只下载，不替换 exe", EXIT_OPERATION)
 
@@ -195,9 +204,18 @@ def run_install(args) -> dict[str, Any]:
     if use_latest:
         new_exe = _download_latest(work_dir)
     else:
-        new_exe = _verified_file(Path(str(file_arg)), sha256_arg)
+        new_exe = _verified_file(Path(str(file_arg)).resolve(), sha256_arg)
+    # 程序目录不可写时脚本必然替换失败，只在 update.log 里留一行；提前拒绝。
+    target = Path(sys.executable)
+    if not can_replace(target):
+        raise CliError(
+            "permission_denied",
+            f"程序目录不可写：{target.parent}。"
+            f"请把程序移到有写入权限的目录，或手动替换 {target.name}。",
+            EXIT_OPERATION,
+        )
     try:
-        script = install_update(new_exe, Path(sys.executable), work_dir, pid=os.getpid())
+        script = install_update(new_exe, target, work_dir, pid=os.getpid())
     except UpdateError as exc:
         raise CliError("update_failed", str(exc), EXIT_OPERATION) from exc
     return {"script": str(script)}
