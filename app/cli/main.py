@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NoReturn
 
-from app.cli.commands import c51, checksum, convert, dotmatrix, image, system
+from app.cli.commands import c51, checksum, config, convert, dotmatrix, image, system
 from app.cli.errors import EXIT_INTERNAL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, CliError
 from app.cli.output import configure_stdio, envelope_error, envelope_ok, write_payload
 
@@ -53,6 +53,7 @@ def build_parser(
     subparsers = parser.add_subparsers(title="命令组", metavar="<command>")
     system.register(subparsers, selftest_report=selftest_report)
     checksum.register(subparsers)
+    config.register(subparsers)
     convert.register(subparsers)
     image.register(subparsers)
     dotmatrix.register(subparsers)
