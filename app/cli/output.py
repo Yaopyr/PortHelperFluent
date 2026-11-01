@@ -30,10 +30,10 @@ _UTF8_ENCODINGS = frozenset({"utf-8", "utf8"})
 def configure_stdio() -> None:
     """把 stdout/stderr 固定为 UTF-8（``errors="replace"``、换行 ``\\n``）。
 
-    Windows 控制台的代码页不再影响管道输出；冻结后的 exe 也一样。已经是 UTF-8 的
-    流保持原样：对捕获流（pytest 的 `sys.stdout`）调用 ``reconfigure`` 会顶掉它自己的
-    收尾输出，"N passed" 汇总行就会消失。流为 ``None``、没有 ``reconfigure`` 或
-    ``encoding`` 缺失/为空时无法判断，同样直接跳过。
+    Windows 控制台的代码页不再影响管道输出；冻结后的 exe 也一样。已经是 UTF-8 的流
+    不需要再配置，直接保持原样，避免无谓地改动宿主（包括测试框架）的捕获流：
+    ``reconfigure`` 会改掉流的编码/错误策略/换行，这些改动对本来正确的流毫无收益。
+    流为 ``None``、没有 ``reconfigure`` 或 ``encoding`` 缺失/为空时无法判断，同样跳过。
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)

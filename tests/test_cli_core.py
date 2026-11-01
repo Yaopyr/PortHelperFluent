@@ -178,7 +178,7 @@ class _RecordingStream:
 
 @pytest.mark.parametrize("encoding", ["utf-8", "UTF-8", "utf8", "utf_8"])
 def test_configure_stdio_leaves_utf8_streams_alone(monkeypatch, encoding: str) -> None:
-    """已经是 UTF-8 的流不调用 reconfigure：pytest 捕获流会因此丢掉汇总行。"""
+    """已经是 UTF-8 的流不需要 reconfigure：不该改动宿主（含测试捕获流）的编码配置。"""
     fake_stdout = _RecordingStream(encoding)
     fake_stderr = _RecordingStream(None)  # encoding 缺失的替身同样不动
     monkeypatch.setattr(sys, "stdout", fake_stdout)
