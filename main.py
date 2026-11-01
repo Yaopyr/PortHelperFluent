@@ -15,7 +15,7 @@ import platform
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from app import APP_VERSION
 from app.core.logging_setup import (
@@ -80,13 +80,12 @@ def create_main_window(settings: Settings, paths: AppPaths) -> "QWidget":
     return MainWindow(settings, paths)
 
 
-def run_selftest(report_path: Path | None = None) -> int:
-    """检查依赖、Qt 绑定与数据目录/日志/配置可写性，并写出 JSON 报告。返回进程退出码。
+def collect_selftest_report() -> dict[str, Any]:
+    """检查依赖、Qt 绑定与数据目录/日志/配置可写性并返回报告，不写任何文件。
 
     自检必须在“程序其实起不来”时也报错：除了新建临时探针，还要真正初始化日志并
     打开已有的 `app.log`、`config.json` 验证文件级写入权限（只读文件同样会让正式
-    启动失败）。任何一步出现异常都收敛成 `errors`，报告始终尝试写出，绝不把
-    traceback 抛给窗口化 exe。
+    启动失败）。任何一步出现异常都收敛成 `errors`，绝不把 traceback 抛给窗口化 exe。
     """
     errors: list[str] = []
     versions = {"qt": "", "qfluentwidgets": ""}
@@ -96,7 +95,7 @@ def run_selftest(report_path: Path | None = None) -> int:
     except Exception as exc:  # 自检自身出错也必须给出可读报告
         errors.append(f"自检过程中出现未预期的错误：{exc!r}")
 
-    report = {
+    return {
         "ok": not errors,
         "errors": errors,
         "python": platform.python_version(),
@@ -108,7 +107,15 @@ def run_selftest(report_path: Path | None = None) -> int:
         "resources": resources,
     }
 
-    exit_code = 0 if not errors else 1
+
+def run_selftest(report_path: Path | None = None) -> int:
+    """执行自检并把报告写出到 `report_path`（可选）。返回进程退出码 0/1。
+
+    旧入口 `--selftest` 的退出码语义保持不变；CLI 的 `selftest` 命令复用
+    `collect_selftest_report()` 并把 `ok=false` 映射为退出码 3。
+    """
+    report = collect_selftest_report()
+    exit_code = 0 if report["ok"] else 1
     if report_path is not None:
         try:
             write_text_atomic(Path(report_path), json.dumps(report, ensure_ascii=False, indent=2))
@@ -254,6 +261,20 @@ def _log_safely(level: int, message: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """入口分流：CLI 参数直接交给 Qt 无关的 CLI，其余保持原有 GUI 启动路径。
+
+    分流必须在导入 GUI 依赖与初始化日志之前完成：CLI 不创建 QApplication、不写
+    app.log、不检查更新（`selftest` 例外，它本身要验证日志可写）。
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    from app.cli import is_cli_invocation
+
+    if is_cli_invocation(argv):
+        from app.cli.main import run
+
+        # 注入收集器：冻结后入口是 `__main__`，命令模块不能再 `import main`。
+        return run(argv, selftest_report=collect_selftest_report)
+
     args = _parse_args(argv)
     if args.selftest:
         return run_selftest(args.report)
