@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NoReturn
 
-from app.cli.commands import checksum, system
+from app.cli.commands import checksum, convert, system
 from app.cli.errors import EXIT_INTERNAL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, CliError
 from app.cli.output import configure_stdio, envelope_error, envelope_ok, write_payload
 
@@ -53,6 +53,7 @@ def build_parser(
     subparsers = parser.add_subparsers(title="命令组", metavar="<command>")
     system.register(subparsers, selftest_report=selftest_report)
     checksum.register(subparsers)
+    convert.register(subparsers)
     return parser
 
 
@@ -74,6 +75,10 @@ def run(
 
     command = getattr(args, "command", "cli")
     fmt = getattr(args, "format", "json")
+    if fmt not in ("json", "text"):
+        # 个别命令的 --format 描述输入编码（如 convert.palette 的 rgb565/rgb332/rgb888），
+        # 信封始终按 JSON 渲染，避免机器可读输出被误当作文本。
+        fmt = "json"
     pretty = bool(getattr(args, "pretty", False))
     handler = getattr(args, "handler", None)
     if handler is None:
