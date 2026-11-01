@@ -15,6 +15,8 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 DATA_KEYS = {"pages", "width", "height", "bytes", "files"}
+# 批量命令额外返回逐文件失败原因，单个坏图不影响其余文件。
+BATCH_KEYS = DATA_KEYS | {"errors"}
 
 
 def _bmp(path: Path, value: int = 0, size: tuple[int, int] = (8, 8)) -> Path:
@@ -40,7 +42,7 @@ def test_text_export_bin_and_c(cli, tmp_path) -> None:
             "16",
             "--out-dir",
             str(tmp_path),
-            "--format",
+            "--export-format",
             "bin",
         ]
     )
@@ -63,7 +65,7 @@ def test_text_export_bin_and_c(cli, tmp_path) -> None:
             "16",
             "--out-dir",
             str(tmp_path),
-            "--format",
+            "--export-format",
             "c",
             "--name",
             "letter",
@@ -88,7 +90,7 @@ def test_toggle_changes_first_byte(cli, tmp_path) -> None:
             "8",
             "--out-dir",
             str(tmp_path / "a"),
-            "--format",
+            "--export-format",
             "bin",
         ]
     )["data"]
@@ -102,7 +104,7 @@ def test_toggle_changes_first_byte(cli, tmp_path) -> None:
             "8",
             "--out-dir",
             str(tmp_path / "b"),
-            "--format",
+            "--export-format",
             "bin",
             "--toggle",
             "0,0,0",
@@ -125,7 +127,7 @@ def test_text_param_mapping(cli, tmp_path) -> None:
             "AB",
             "--out-dir",
             str(tmp_path / "h"),
-            "--format",
+            "--export-format",
             "bin",
         ]
     )["data"]
@@ -137,7 +139,7 @@ def test_text_param_mapping(cli, tmp_path) -> None:
             "AB",
             "--out-dir",
             str(tmp_path / "v"),
-            "--format",
+            "--export-format",
             "bin",
             "--scan",
             "vertical",
@@ -166,13 +168,40 @@ def test_text_param_mapping(cli, tmp_path) -> None:
             "1",
             "--out-dir",
             str(tmp_path / "paged"),
-            "--format",
+            "--export-format",
             "bin",
         ]
     )["data"]
     assert paged["pages"] >= 2
     assert paged["width"] == 8
     assert paged["pages"] > horizontal["pages"]
+
+
+def test_output_format_and_pretty(cli, tmp_path) -> None:
+    """``--format json|text`` 与 ``--pretty`` 是各叶子解析器共用的输出选项。"""
+    out_dir = str(tmp_path / "out")
+
+    payload = cli(
+        ["dotmatrix", "text", "--text", "A", "--out-dir", out_dir, "--format", "text"]
+    )
+    assert payload["exit_code"] == 0
+    assert "ok: true" in payload["raw"] and "dotmatrix.text" in payload["raw"]
+
+    payload = cli(
+        [
+            "dotmatrix",
+            "text",
+            "--text",
+            "A",
+            "--out-dir",
+            out_dir,
+            "--format",
+            "json",
+            "--pretty",
+        ]
+    )
+    assert payload["exit_code"] == 0
+    assert payload["ok"] is True and payload["command"] == "dotmatrix.text"
 
 
 def test_text_error_paths(cli, tmp_path) -> None:
@@ -193,7 +222,7 @@ def test_text_error_paths(cli, tmp_path) -> None:
         ["--scan", "diagonal"],
         ["--direction", "up"],
         ["--bit-order", "middle"],
-        ["--format", "png"],
+        ["--export-format", "png"],
         ["--font-family", "Arial", "--font-file", "a.ttf"],
     ):
         payload = cli(
@@ -233,7 +262,7 @@ def test_text_error_paths(cli, tmp_path) -> None:
             out_dir,
             "--font-family",
             "NoSuchFontFamily",
-            "--format",
+            "--export-format",
             "bin",
         ]
     )
@@ -283,7 +312,7 @@ def test_bmp_export_bin_and_c(cli, tmp_path) -> None:
             str(src),
             "--out-dir",
             str(tmp_path / "bin"),
-            "--format",
+            "--export-format",
             "bin",
         ]
     )
@@ -305,7 +334,7 @@ def test_bmp_export_bin_and_c(cli, tmp_path) -> None:
             str(src),
             "--out-dir",
             str(tmp_path / "inverted"),
-            "--format",
+            "--export-format",
             "bin",
             "--invert",
         ]
@@ -322,7 +351,7 @@ def test_bmp_export_bin_and_c(cli, tmp_path) -> None:
             str(src),
             "--out-dir",
             str(tmp_path / "named"),
-            "--format",
+            "--export-format",
             "c",
             "--name",
             "glyph",
@@ -344,7 +373,7 @@ def test_bmp_toggle_flips_one_cell(cli, tmp_path) -> None:
             str(src),
             "--out-dir",
             str(tmp_path / "out"),
-            "--format",
+            "--export-format",
             "bin",
             "--toggle",
             "0,0,0",
@@ -375,7 +404,16 @@ def test_bmp_error_paths(cli, tmp_path) -> None:
 
     # 错误的导出格式、图片模式不适用分页参数、缺必填项：用法错误（2）。
     payload = cli(
-        ["dotmatrix", "bmp", "--file", str(broken), "--out-dir", out_dir, "--format", "png"]
+        [
+            "dotmatrix",
+            "bmp",
+            "--file",
+            str(broken),
+            "--out-dir",
+            out_dir,
+            "--export-format",
+            "png",
+        ]
     )
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
@@ -407,7 +445,8 @@ def test_batch_generates_one_c_file_per_image(cli, tmp_path) -> None:
     assert payload["exit_code"] == 0
     assert payload["command"] == "dotmatrix.batch"
     data = payload["data"]
-    assert set(data) == DATA_KEYS
+    assert set(data) == BATCH_KEYS
+    assert data["errors"] == {}
     assert data["pages"] == 2
     assert data["width"] == 8 and data["height"] == 8 and data["bytes"] == 16
     assert sorted(Path(path).name for path in data["files"]) == ["a.c", "b.c"]
@@ -432,6 +471,28 @@ def test_batch_generates_one_c_file_per_image(cli, tmp_path) -> None:
     assert payload["data"]["pages"] == 3
 
 
+def test_batch_collects_errors_without_aborting(cli, tmp_path) -> None:
+    folder = tmp_path / "src"
+    folder.mkdir()
+    good = _bmp(folder / "good.bmp", 0)
+    bad = folder / "bad.bmp"
+    bad.write_bytes(b"not an image")
+
+    payload = cli(
+        ["dotmatrix", "batch", "--folder", str(folder), "--out-dir", str(tmp_path / "out")]
+    )
+    assert payload["exit_code"] == 0
+    data = payload["data"]
+    assert set(data) == BATCH_KEYS
+    # 好图照常写出 C，坏图只记入 errors。
+    assert (tmp_path / "out" / "good.c").exists()
+    assert data["files"] == [str(tmp_path / "out" / "good.c")]
+    assert data["pages"] == 1 and data["bytes"] == 8
+    assert list(data["errors"]) == [str(bad)]
+    assert "无法读取图片" in data["errors"][str(bad)]
+    assert str(good) not in data["errors"]
+
+
 def test_batch_error_paths(cli, tmp_path) -> None:
     out_dir = str(tmp_path / "out")
 
@@ -451,7 +512,7 @@ def test_batch_error_paths(cli, tmp_path) -> None:
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "invalid_input"
 
-    # 坏图片不静默跳过：输入非法（3）。
+    # 全部图片都读不了：没有可用输出，仍是输入非法（3）。
     broken_dir = tmp_path / "broken"
     broken_dir.mkdir()
     (broken_dir / "bad.bmp").write_bytes(b"not an image")
@@ -463,6 +524,13 @@ def test_batch_error_paths(cli, tmp_path) -> None:
 
     # 缺 --out-dir：用法错误（2）。
     assert cli(["dotmatrix", "batch", "--folder", str(empty)])["exit_code"] == 2
+
+    # 批量只产出 C，没有 --export-format：未知参数仍是用法错误（2）。
+    payload = cli(
+        ["dotmatrix", "batch", "--folder", str(empty), "--out-dir", out_dir, "--export-format", "bin"]
+    )
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
 
 
 # ---------------------------------------------------------------------------

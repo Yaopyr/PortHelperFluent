@@ -2,7 +2,8 @@
 
 - ``text``：文字 → 分页点阵 → 一个 ``.c`` 或 ``.bin``，可用 ``--toggle`` 手工翻转单元格；
 - ``bmp``：一张图片 → 单页点阵 → 一个 ``.c`` 或 ``.bin``；
-- ``batch``：文件夹内每张图片各自生成一个独立 ``.c``（文件名取输入 stem）。
+- ``batch``：文件夹内每张图片各自生成一个独立 ``.c``（文件名取输入 stem），
+  单张图片失败只记入 ``errors``，不中断其余文件。
 
 渲染、分页、扫描排列与位序打包都来自 :mod:`app.core.fontmatrix`（与 GUI 同一套
 实现），本模块只做参数映射、编辑与结果组装。
@@ -11,8 +12,8 @@
 都只拉轻量依赖，真正跑 ``dotmatrix`` 命令时才付出这部分开销。解析器里的允许集合
 使用本模块的常量，避免构造解析器时导入核心模块。
 
-注意：``--format`` 在本组表示导出格式（``c``/``bin``），因此不提供 ``--format
-json|text``；stdout 始终是 JSON 信封。
+导出格式用 ``--export-format c|bin``；``--format json|text`` 与 ``--pretty`` 仍是
+各叶子解析器的通用输出选项。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.cli.errors import EXIT_OPERATION, EXIT_USAGE, CliError
+from app.cli.output import add_output_options
 from app.services.exports import sanitize_name, unique_path, write_bytes_atomic, write_text_atomic
 
 if TYPE_CHECKING:
@@ -73,6 +75,7 @@ def _register_text(subparsers) -> None:
     _add_font_params(parser)
     _add_image_params(parser)
     _add_page_args(parser)
+    add_output_options(parser)
     parser.set_defaults(handler=text, command="dotmatrix.text")
 
 
@@ -117,6 +120,7 @@ def _register_bmp(subparsers) -> None:
     _add_output_args(parser)
     _add_image_params(parser)
     _add_toggle_arg(parser)
+    add_output_options(parser)
     parser.set_defaults(handler=bmp, command="dotmatrix.bmp")
 
 
@@ -164,11 +168,12 @@ def _register_batch(subparsers) -> None:
         help="递归处理子文件夹（默认只看当前文件夹）。",
     )
     _add_image_params(parser)
+    add_output_options(parser)
     parser.set_defaults(handler=batch, command="dotmatrix.batch")
 
 
 def batch(args) -> dict[str, Any]:
-    """把文件夹内每张图片导出为独立 C 文件，返回累计统计与文件列表。"""
+    """把文件夹内每张图片导出为独立 C 文件，返回累计统计、失败原因与文件列表。"""
     from app.core.fontmatrix import matrix_from_image, matrix_to_bytes, matrix_to_c
     from app.core.imaging import list_image_files
 
@@ -193,35 +198,40 @@ def batch(args) -> dict[str, Any]:
 
     out_dir = Path(getattr(args, "out_dir"))
     files: list[str] = []
+    errors: dict[str, str] = {}
     pages_count = width = height = total_bytes = 0
     for source in paths:
         try:
             matrix = matrix_from_image(source, params)
-        except ValueError as exc:
-            raise CliError("invalid_input", str(exc), EXIT_OPERATION) from exc
-        name = source.stem or DEFAULT_NAME
-        target = unique_path(
-            out_dir / f"{sanitize_name(name, fallback=DEFAULT_NAME)}{_SUFFIXES['c']}"
-        )
-        try:
+            name = source.stem or DEFAULT_NAME
+            target = unique_path(
+                out_dir / f"{sanitize_name(name, fallback=DEFAULT_NAME)}{_SUFFIXES['c']}"
+            )
             write_text_atomic(target, matrix_to_c([matrix], params, name))
-        except OSError as exc:
-            raise CliError(
-                "permission_denied",
-                f"写出点阵失败：{target}（{exc}）。请检查磁盘空间或目录权限。",
-                EXIT_OPERATION,
-            ) from exc
+        except (ValueError, OSError) as exc:
+            # 单张图片失败只记录原因，继续处理其余文件。
+            errors[str(source)] = str(exc).strip() or type(exc).__name__
+            continue
         files.append(str(target))
         pages_count += 1
         width = max(width, matrix.cols)
         height = max(height, matrix.rows)
         total_bytes += len(matrix_to_bytes(matrix, params))
+    if not files:
+        source, reason = next(iter(errors.items()))
+        raise CliError(
+            "invalid_input",
+            f"文件夹中的图片都无法导出：{folder}（{Path(source).name}：{reason}）。",
+            EXIT_OPERATION,
+            details={"errors": errors},
+        )
     return {
         "pages": pages_count,
         "width": width,
         "height": height,
         "bytes": total_bytes,
         "files": files,
+        "errors": errors,
     }
 
 
@@ -239,7 +249,7 @@ def _add_output_args(parser) -> None:
         help="输出目录，不存在时自动创建。",
     )
     parser.add_argument(
-        "--format",
+        "--export-format",
         dest="export_format",
         choices=EXPORT_FORMATS,
         default="c",
@@ -436,7 +446,7 @@ def _parse_toggle(value: str) -> tuple[int, int, int]:
 
 
 def _export(args, pages: list[Matrix], params: FontParams, *, default_name: str) -> dict[str, Any]:
-    """按 ``--format`` 写出单文件并返回 ``pages``/``width``/``height``/``bytes``/``files``。"""
+    """按 ``--export-format`` 写出单文件并返回 ``pages``/``width``/``height``/``bytes``/``files``。"""
     from app.core.fontmatrix import matrix_to_c, matrices_to_bytes
 
     fmt = str(getattr(args, "export_format", "c"))
