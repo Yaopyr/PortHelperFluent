@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NoReturn
 
-from app.cli.commands import checksum, convert, image, system
+from app.cli.commands import checksum, convert, dotmatrix, image, system
 from app.cli.errors import EXIT_INTERNAL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, CliError
 from app.cli.output import configure_stdio, envelope_error, envelope_ok, write_payload
 
@@ -55,6 +55,7 @@ def build_parser(
     checksum.register(subparsers)
     convert.register(subparsers)
     image.register(subparsers)
+    dotmatrix.register(subparsers)
     return parser
 
 
