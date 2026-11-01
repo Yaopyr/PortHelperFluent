@@ -94,7 +94,21 @@ def run(
             pretty=pretty,
         )
     except SystemExit as exc:
-        return _exit_code(exc)
+        # 命令自己 ``sys.exit()``：0 视为成功；非 0 也必须是完整信封（internal/1），
+        # 不能直接返回原始退出码让 stdout 空着。
+        if _exit_code(exc) == EXIT_OK:
+            return EXIT_OK
+        return _finish_error(
+            command,
+            CliError(
+                "internal",
+                f"命令以 SystemExit({exc.code!r}) 提前结束，未返回结果。",
+                EXIT_INTERNAL,
+            ),
+            started,
+            fmt=fmt,
+            pretty=pretty,
+        )
     except Exception as exc:  # 未预期异常只给一行摘要，不打 traceback
         summary = f"命令执行失败（{type(exc).__name__}）：{exc}"
         return _finish_error(

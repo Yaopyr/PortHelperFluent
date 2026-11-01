@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -13,9 +14,32 @@ from pathlib import Path
 
 from app import APP_VERSION
 from app.cli import CLI_GROUPS, is_cli_invocation
+import app.cli.main as cli_main
 from app.cli.main import run
+from app.cli.output import add_output_options
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _parser_with_handler(handler) -> argparse.ArgumentParser:
+    """只含一个 ``boom`` 子命令的替身根解析器，用于覆盖 ``run()`` 的 handler 错误分支。
+
+    通过 monkeypatch 替换 ``app.cli.main.build_parser``，不往生产代码里加测试专用钩子。
+    """
+    parser = argparse.ArgumentParser(prog="PortHelperFluent", add_help=False)
+    subparsers = parser.add_subparsers()
+    boom = subparsers.add_parser("boom", add_help=False)
+    add_output_options(boom)
+    boom.set_defaults(handler=handler, command="boom")
+    return parser
+
+
+def _use_handler(monkeypatch, handler) -> None:
+    monkeypatch.setattr(
+        cli_main,
+        "build_parser",
+        lambda selftest_report=None: _parser_with_handler(handler),
+    )
 
 
 def test_is_cli_invocation() -> None:
@@ -93,6 +117,60 @@ def test_selftest_keeps_stdout_machine_readable(capsys) -> None:
     captured = capsys.readouterr()
     assert json.loads(captured.out)["data"]["ok"] is True
     assert "第三方库的提示" in captured.err
+
+
+def test_handler_error_becomes_internal_envelope(monkeypatch, capsys) -> None:
+    def raise_error(args) -> dict:
+        raise RuntimeError("模拟命令内部错误")
+
+    _use_handler(monkeypatch, raise_error)
+
+    assert run(["boom"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert payload["command"] == "boom"
+    assert payload["error"]["code"] == "internal"
+    assert "RuntimeError" in payload["error"]["message"]
+    # 只向 stderr 写一行摘要，stdout/stderr 都不出现 traceback。
+    assert "Traceback" not in captured.out and "Traceback" not in captured.err
+    assert len(captured.err.strip().splitlines()) == 1
+
+
+def test_handler_keyboard_interrupt_maps_to_130(monkeypatch, capsys) -> None:
+    def interrupt(args) -> dict:
+        raise KeyboardInterrupt
+
+    _use_handler(monkeypatch, interrupt)
+
+    assert run(["boom"]) == 130
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "interrupted"
+
+
+def test_handler_nonzero_system_exit_keeps_envelope(monkeypatch, capsys) -> None:
+    """命令自己 ``sys.exit(3)`` 时 stdout 仍要有完整信封：退出码收敛成 internal/1。"""
+
+    def exit_nonzero(args) -> dict:
+        raise SystemExit(3)
+
+    _use_handler(monkeypatch, exit_nonzero)
+
+    assert run(["boom"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "internal"
+    assert "3" in payload["error"]["message"]
+
+
+def test_handler_zero_system_exit_returns_zero(monkeypatch) -> None:
+    def exit_zero(args) -> dict:
+        raise SystemExit(0)
+
+    _use_handler(monkeypatch, exit_zero)
+
+    assert run(["boom"]) == 0
 
 
 def test_cli_import_does_not_import_pyqt6() -> None:
