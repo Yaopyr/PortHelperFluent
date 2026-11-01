@@ -1,11 +1,12 @@
-"""``net`` 命令组：TCP/UDP 收发、UDP 只收流、ping、域名解析与网卡枚举。
+"""``net`` 命令组：TCP/UDP 收发、UDP 只收流、TCP 服务端、ping、域名解析与网卡枚举。
 
 - ``tcp``/``udp``：标准库 socket 收发，发送后按 ``--expect``/``--read-for`` 有界读取；
 - ``udp --listen-only``：只收不发，按 NDJSON 输出 ``start``/``data``/``end`` 事件；
+- ``server``：有界 TCP 服务端，按 NDJSON 输出 ``listening``/``client_*``/``end`` 事件；
 - ``ping``/``resolve``/``adapters``：复用 :mod:`app.services.net_tools`，不重复实现。
 
-``net server`` 属于后续任务，本模块暂不注册。模块级只导入标准库、CLI 原语与
-``net_tools``（后者只依赖标准库/psutil），不会把 Qt 带进 CLI 进程。
+模块级只导入标准库、CLI 原语与 ``net_tools``（后者只依赖标准库/psutil），不会把
+Qt 带进 CLI 进程。
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ __all__ = [
     "run_adapters",
     "run_ping",
     "run_resolve",
+    "run_server",
     "run_tcp",
     "run_udp",
 ]
@@ -39,6 +41,7 @@ _DEFAULT_READ_FOR = 1.0
 _DEFAULT_REPEAT = 1
 _DEFAULT_INTERVAL_MS = 100
 _DEFAULT_PING_COUNT = 4
+_DEFAULT_MAX_CLIENTS = 16
 _MIN_PORT = 1
 _MAX_PORT = 65535
 
@@ -47,13 +50,14 @@ def register(subparsers) -> None:
     """注册 ``net`` 命令组（不带处理器的中间层解析器）。"""
     parser = subparsers.add_parser(
         "net",
-        help="网络：TCP/UDP 收发与 UDP 只收、ping、域名解析、网卡枚举。",
+        help="网络：TCP/UDP 收发、UDP 只收、TCP 服务端、ping、域名解析、网卡枚举。",
         description="直接使用标准库 socket 与系统网络工具，不启动 GUI；"
-        "可用子命令：tcp、udp、ping、resolve、adapters。",
+        "可用子命令：tcp、udp、server、ping、resolve、adapters。",
     )
     group = parser.add_subparsers(title="子命令", metavar="<action>")
     _register_tcp(group)
     _register_udp(group)
+    _register_server(group)
     _register_ping(group)
     _register_resolve(group)
     _register_adapters(group)
@@ -221,18 +225,7 @@ def run_udp(args) -> dict[str, Any]:
 
 def _run_listen_only(args) -> dict[str, Any]:
     """校验只收模式并调用 :func:`net_io.udp_listen`，返回最终汇总。"""
-    if str(getattr(args, "format", "json")) == "text":
-        raise CliError(
-            "usage",
-            "流式命令固定输出 NDJSON，不支持 --format text。",
-            EXIT_USAGE,
-        )
-    if bool(getattr(args, "pretty", False)):
-        raise CliError(
-            "usage",
-            "流式命令固定输出 NDJSON，不支持 --pretty。",
-            EXIT_USAGE,
-        )
+    _require_ndjson(args)
     for attribute, option in (
         ("source", "--text/--hex/--file/--stdin"),
         ("repeat", "--repeat"),
@@ -293,6 +286,103 @@ def _listen_emitter(codec: str):
         emit_event(event)
 
     return emit
+
+
+# ---------------------------------------------------------------------------
+# server
+# ---------------------------------------------------------------------------
+
+
+def _register_server(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "server",
+        help="在本机启动有界 TCP 服务端，按 NDJSON 输出连接与数据事件。",
+        description="监听 --bind/--port 后按 --duration 运行；--echo 原样回发收到的数据，"
+        "--reply 对每次收到的数据回发固定文本，--greeting 在新客户端连接时立即发送。"
+        "必须给 --duration，且不接受 --format text/--pretty、--until/--until-hex。",
+    )
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        metavar="HOST",
+        help="监听地址，默认 127.0.0.1。",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        metavar="PORT",
+        help="监听端口，0 表示由系统分配（默认 0）。",
+    )
+    parser.add_argument(
+        "--max-clients",
+        type=int,
+        default=_DEFAULT_MAX_CLIENTS,
+        metavar="N",
+        help=f"同时接入的客户端上限，默认 {_DEFAULT_MAX_CLIENTS}。",
+    )
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument(
+        "--echo",
+        action="store_true",
+        help="把收到的数据原样回发给对应客户端。",
+    )
+    action.add_argument(
+        "--reply",
+        metavar="TEXT",
+        help="对每次收到的数据回发固定文本（UTF-8）。",
+    )
+    parser.add_argument(
+        "--greeting",
+        metavar="TEXT",
+        help="新客户端连接时立即发送的问候文本（UTF-8）。",
+    )
+    add_stream_options(parser)
+    add_output_options(parser)
+    parser.set_defaults(handler=run_server, command="net.server")
+
+
+def run_server(args) -> dict[str, Any]:
+    """校验流式参数并调用 :func:`net_io.serve_tcp`，返回最终汇总。"""
+    _require_ndjson(args)
+    if getattr(args, "until", None) is not None or getattr(args, "until_hex", None) is not None:
+        raise CliError(
+            "usage",
+            "net server 不支持 --until/--until-hex，请用 --duration/--max-bytes/"
+            "--max-events 结束。",
+            EXIT_USAGE,
+        )
+
+    options = read_stream_options(args)
+    bind = str(getattr(args, "bind", "") or "").strip()
+    if not bind:
+        raise CliError("usage", "--bind 不能为空。", EXIT_USAGE)
+    port = _port(getattr(args, "port", 0), "--port", minimum=0)
+    max_clients = _positive_int(
+        getattr(args, "max_clients", None), "--max-clients", _DEFAULT_MAX_CLIENTS
+    )
+
+    try:
+        return net_io.serve_tcp(
+            bind,
+            port,
+            duration=options.duration,
+            max_clients=max_clients,
+            emit=emit_event,
+            echo=bool(getattr(args, "echo", False)),
+            reply=getattr(args, "reply", None),
+            greeting=getattr(args, "greeting", None),
+            max_bytes=options.max_bytes,
+            max_events=options.max_events,
+        )
+    except CliError:
+        raise
+    except OSError as exc:
+        raise CliError(
+            "connection_failed",
+            f"监听 {bind}:{port} 失败：{exc}",
+            EXIT_OPERATION,
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +475,22 @@ def run_adapters(args) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 公共辅助
 # ---------------------------------------------------------------------------
+
+
+def _require_ndjson(args) -> None:
+    """流式命令固定输出 NDJSON：拒绝 ``--format text`` 与 ``--pretty``。"""
+    if str(getattr(args, "format", "json")) == "text":
+        raise CliError(
+            "usage",
+            "流式命令固定输出 NDJSON，不支持 --format text。",
+            EXIT_USAGE,
+        )
+    if bool(getattr(args, "pretty", False)):
+        raise CliError(
+            "usage",
+            "流式命令固定输出 NDJSON，不支持 --pretty。",
+            EXIT_USAGE,
+        )
 
 
 def _add_send_options(parser) -> None:
