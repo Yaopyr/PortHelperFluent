@@ -55,9 +55,10 @@ def tcp_exchange(
     """连接 TCP 服务端，写入 ``repeat`` 次 ``payload`` 后按需读取回包。
 
     返回 ``sent``（``bytes``/``writes``，写入总字节数与次数）、``received``（原始
-    字节）、``matched``（``matcher`` 是否命中）、``local_port``（连接后的实际本地
-    端口）。给了 ``matcher`` 时等待 ``timeout``，否则按 ``read_for`` 做固定窗口读取；
-    ``read_for`` 为 0 时不读。连接阶段的异常原样上抛。
+    字节）、``matched``（``matcher`` 是否命中）、``chunks``（返回非空数据的读取次数）、
+    ``remote``（``host:port``）与 ``local_port``（连接后的实际本地端口）。给了
+    ``matcher`` 时等待 ``timeout``，否则按 ``read_for`` 做固定窗口读取；``read_for``
+    为 0 时不读。连接阶段的异常原样上抛。
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -82,6 +83,8 @@ def tcp_exchange(
         "sent": sent,
         "received": outcome.data,
         "matched": outcome.matched,
+        "chunks": outcome.chunks,
+        "remote": f"{host}:{port}",
         "local_port": actual_local_port,
     }
 
@@ -100,8 +103,9 @@ def udp_exchange(
 ) -> dict:
     """向 UDP 目标发送 ``repeat`` 次数据报，并按需等待回包。
 
-    返回 ``sent``、``received``、``matched``、``local_port``（绑定后的实际端口）与
-    ``from``（最后一个回包的来源地址 ``ip:port``，没收到时为 None）。
+    返回 ``sent``、``received``、``matched``、``chunks``（返回非空数据的读取次数）、
+    ``remote``（最后一个回包的来源 ``ip:port``，没收到时为 ``host:port``）与
+    ``local_port``（绑定后的实际端口）。
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sources: list[str] = []
@@ -127,8 +131,9 @@ def udp_exchange(
         "sent": sent,
         "received": outcome.data,
         "matched": outcome.matched,
+        "chunks": outcome.chunks,
+        "remote": sources[-1] if sources else f"{host}:{port}",
         "local_port": actual_local_port,
-        "from": sources[-1] if sources else None,
     }
 
 
@@ -140,7 +145,7 @@ def udp_listen(
     max_bytes: int | None = None,
     max_events: int | None = None,
 ) -> dict:
-    """在 ``127.0.0.1`` 上只收不发，按 NDJSON 事件输出有界监听结果。
+    """在所有 IPv4 接口上只收不发，按 NDJSON 事件输出有界监听结果。
 
     事件依次为 ``start``（实际绑定端口）、每个非空数据报一条 ``data``
     （``hex``/``text``/``size``/``at``/``from``）与 ``end``（``duration_s``/``bytes``/
@@ -150,7 +155,7 @@ def udp_listen(
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.bind(("127.0.0.1", bind_port))
+        sock.bind(("", bind_port))
         actual_port = int(sock.getsockname()[1])
         started = _clock()
         deadline = started + duration
@@ -239,10 +244,14 @@ def _read_response(fetch, *, matcher, timeout: float, read_for: float):
 
 
 def _fetch_tcp(sock, seconds: float, host: str, port: int) -> bytes:
-    """单次 TCP 读取：等待窗口内无数据返回空块，其它错误转 ``CliError``。"""
+    """单次 TCP 读取：等待窗口内无数据返回空块，其它错误转 ``CliError``。
+
+    对端已关闭（``recv`` 返回 ``b""``）时 sleep 一个轮询窗口，避免 ``read_until``
+    在固定读取窗口或 ``--expect`` 等待中空转占满 CPU。
+    """
     sock.settimeout(max(seconds, MIN_WAIT))
     try:
-        return sock.recv(TCP_RECV_CHUNK)
+        chunk = sock.recv(TCP_RECV_CHUNK)
     except TimeoutError:
         return b""
     except OSError as exc:
@@ -251,6 +260,10 @@ def _fetch_tcp(sock, seconds: float, host: str, port: int) -> bytes:
             f"从 {host}:{port} 接收数据失败：{exc}",
             EXIT_OPERATION,
         ) from exc
+    if not chunk:
+        time.sleep(max(seconds, MIN_WAIT))
+        return b""
+    return chunk
 
 
 def _fetch_udp(sock, seconds: float, host: str, port: int) -> tuple[bytes, object]:

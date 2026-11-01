@@ -15,6 +15,7 @@ import threading
 import pytest
 
 from app.cli.commands import net
+from app.cli.transports import net_io
 from app.services.net_tools import PingResult
 
 
@@ -97,16 +98,19 @@ def _udp_echo_server():
         thread.join(timeout=2)
 
 
-def _send_udp(port: int, payload: bytes) -> None:
-    """向本机回环端口发送一个数据报。"""
+def _send_udp(port: int, payload: bytes, count: int = 1) -> None:
+    """向本机回环端口发送 ``count`` 个数据报。"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.sendto(payload, ("127.0.0.1", port))
+        for _ in range(count):
+            sock.sendto(payload, ("127.0.0.1", port))
     finally:
         sock.close()
 
 
-def _install_listen_sender(monkeypatch, payload: bytes) -> list[threading.Thread]:
+def _install_listen_sender(
+    monkeypatch, payload: bytes, *, count: int = 1
+) -> list[threading.Thread]:
     """在 ``start`` 事件里拿到实际绑定端口，并从发送线程向它发包。"""
     threads: list[threading.Thread] = []
     real_emit = net.emit_event
@@ -116,7 +120,9 @@ def _install_listen_sender(monkeypatch, payload: bytes) -> list[threading.Thread
         if event.get("event") != "start":
             return
         thread = threading.Thread(
-            target=_send_udp, args=(int(event["port"]), payload), daemon=True
+            target=_send_udp,
+            args=(int(event["port"]), payload, count),
+            daemon=True,
         )
         thread.start()
         threads.append(thread)
@@ -167,8 +173,14 @@ def test_tcp_echo_with_expect_and_local_port(cli) -> None:
     assert payload["command"] == "net.tcp"
     data = payload["data"]
     assert data["sent"] == {"bytes": 4, "writes": 1}
-    assert data["received"] == {"hex": "70696e67", "text": "ping", "size": 4}
+    assert data["received"] == {
+        "hex": "70696e67",
+        "text": "ping",
+        "size": 4,
+        "chunks": 1,
+    }
     assert data["matched"] is True
+    assert data["remote"] == f"127.0.0.1:{port}"
     assert data["local_port"] == local_port
 
 
@@ -193,6 +205,8 @@ def test_tcp_read_for_zero_skips_read(cli) -> None:
     data = payload["data"]
     assert data["matched"] is False
     assert data["received"]["size"] == 0
+    assert data["received"]["chunks"] == 0
+    assert data["remote"] == f"127.0.0.1:{port}"
     assert data["local_port"] != 0
 
 
@@ -249,6 +263,62 @@ def test_tcp_expect_timeout_exits_4(cli) -> None:
     assert f"127.0.0.1:{port}" in payload["error"]["message"]
 
 
+def test_tcp_expect_timeout_when_server_closes(cli) -> None:
+    """对端读完即关闭：recv 返回 b"" 后仍按截止时间结束，不因 EOF 忙等或报错。"""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = int(server.getsockname()[1])
+
+    def serve() -> None:
+        conn, _ = server.accept()
+        try:
+            conn.recv(4096)
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        payload = cli(
+            [
+                "net",
+                "tcp",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--text",
+                "ping",
+                "--expect",
+                "never",
+                "--timeout",
+                "0.2",
+            ]
+        )
+    finally:
+        server.close()
+        thread.join(timeout=2)
+
+    assert payload["exit_code"] == 4
+    assert payload["error"]["code"] == "timeout"
+    assert payload["elapsed_ms"] < 2000
+
+
+def test_fetch_tcp_sleeps_when_peer_closed(monkeypatch) -> None:
+    """``recv`` 返回 b"" 时 sleep 一个轮询窗口，避免 read_until 空转。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(net_io.time, "sleep", sleeps.append)
+
+    client, server = socket.socketpair()
+    try:
+        server.close()
+        assert net_io._fetch_tcp(client, 0.05, "127.0.0.1", 1) == b""
+    finally:
+        client.close()
+    assert sleeps == [0.05]
+
+
 # ---------------------------------------------------------------------------
 # UDP 发送
 # ---------------------------------------------------------------------------
@@ -278,10 +348,11 @@ def test_udp_echo_with_expect(cli) -> None:
     data = payload["data"]
     assert data["sent"] == {"bytes": 2, "writes": 1}
     assert data["received"]["text"] == "hi"
+    assert data["received"]["chunks"] == 1
     assert data["matched"] is True
+    assert data["remote"] == f"127.0.0.1:{port}"
     assert data["local_port"] != 0
-    assert isinstance(data["from"], str)
-    assert data["from"].startswith("127.0.0.1:")
+    assert "from" not in data
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +421,51 @@ def test_udp_listen_max_bytes_truncates_and_decodes(cli, monkeypatch) -> None:
     assert events[1]["size"] == 2
     assert payload["data"]["bytes"] == 2
     assert payload["data"]["events"] == 1
+
+
+def test_udp_listen_max_events_stops_after_first(cli, monkeypatch) -> None:
+    threads = _install_listen_sender(monkeypatch, b"one", count=2)
+    payload = cli(
+        ["net", "udp", "--listen-only", "--duration", "1", "--max-events", "1"]
+    )
+    _join(threads)
+
+    assert payload["exit_code"] == 0
+    events = _events(payload)
+    assert [event.get("event") for event in events[:-1]] == ["start", "data", "end"]
+    assert payload["data"]["events"] == 1
+    assert payload["data"]["bytes"] == 3
+
+
+def test_udp_listen_binds_all_ipv4_interfaces(monkeypatch) -> None:
+    """只收模式绑定所有 IPv4 接口（地址为空串），而不是仅回环。"""
+    binds: list[tuple] = []
+    closed: list[bool] = []
+    real_socket = socket.socket
+
+    class SpySocket:
+        def __init__(self, *args, **kwargs):
+            self._socket = real_socket(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._socket, name)
+
+        def bind(self, address):
+            binds.append(address)
+            return self._socket.bind(address)
+
+        def close(self):
+            closed.append(True)
+            return self._socket.close()
+
+    monkeypatch.setattr(net_io.socket, "socket", SpySocket)
+    monkeypatch.setattr(net_io, "_clock", lambda: 0.0)
+    summary = net_io.udp_listen(0, duration=0, emit=lambda event: None)
+
+    assert binds == [("", 0)]
+    assert closed == [True]
+    assert summary["events"] == 0
+    assert summary["port"] > 0
 
 
 @pytest.mark.parametrize(

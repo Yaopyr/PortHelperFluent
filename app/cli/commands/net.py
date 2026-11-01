@@ -87,7 +87,7 @@ def _register_tcp(subparsers) -> None:
 
 
 def run_tcp(args) -> dict[str, Any]:
-    """发送输入并读取回包，返回 ``sent``/``received``/``matched``/``local_port``。"""
+    """发送输入并读取回包，返回 ``sent``/``received``/``matched``/``remote``/``local_port``。"""
     data = read_input(args)
     host = str(getattr(args, "host", "") or "").strip()
     port = _port(getattr(args, "port", None), "--port", minimum=_MIN_PORT)
@@ -125,8 +125,11 @@ def run_tcp(args) -> dict[str, Any]:
     _check_expect(matcher, result["matched"], host, port)
     return {
         "sent": result["sent"],
-        "received": _received_data(result["received"], data.encoding),
+        "received": _received_data(
+            result["received"], data.encoding, result["chunks"]
+        ),
         "matched": result["matched"],
+        "remote": result["remote"],
         "local_port": result["local_port"],
     }
 
@@ -141,7 +144,7 @@ def _register_udp(subparsers) -> None:
         "udp",
         help="向 UDP 目标发送数据并等待回包，或只收不发（--listen-only）。",
         description="发送模式按 --repeat 写入并按需等待回包；--listen-only 只收不发，"
-        "必须给 --duration，输出 NDJSON start/data/end 事件，"
+        "在所有 IPv4 接口上监听，必须给 --duration，输出 NDJSON start/data/end 事件，"
         "且不接受发送参数与 --format text/--pretty。",
     )
     parser.add_argument("--host", metavar="HOST", help="目标主机（发送模式必填）。")
@@ -156,7 +159,7 @@ def _register_udp(subparsers) -> None:
     parser.add_argument(
         "--listen-only",
         action="store_true",
-        help="只收不发：必须搭配 --duration，按 NDJSON 输出收到的事件。",
+        help="只收不发：在所有 IPv4 接口上监听，必须搭配 --duration，按 NDJSON 输出事件。",
     )
     add_input_options(parser, required=False)
     _add_send_options(parser)
@@ -166,7 +169,7 @@ def _register_udp(subparsers) -> None:
 
 
 def run_udp(args) -> dict[str, Any]:
-    """发送模式返回 ``sent``/``received``/``matched``/``local_port``/``from``。"""
+    """发送模式返回 ``sent``/``received``/``matched``/``remote``/``local_port``。"""
     if bool(getattr(args, "listen_only", False)):
         return _run_listen_only(args)
 
@@ -207,10 +210,12 @@ def run_udp(args) -> dict[str, Any]:
     _check_expect(matcher, result["matched"], host, port)
     return {
         "sent": result["sent"],
-        "received": _received_data(result["received"], data.encoding),
+        "received": _received_data(
+            result["received"], data.encoding, result["chunks"]
+        ),
         "matched": result["matched"],
+        "remote": result["remote"],
         "local_port": result["local_port"],
-        "from": result["from"],
     }
 
 
@@ -405,7 +410,8 @@ def _add_send_options(parser) -> None:
         type=float,
         default=None,
         metavar="SECONDS",
-        help="等待 --expect/--expect-hex 的秒数，默认 5。",
+        help="等待 --expect/--expect-hex 的秒数，默认 5；"
+        "0 表示 expect 不等待（连接阶段仍用 5 秒兜底）。",
     )
     parser.add_argument(
         "--read-for",
@@ -484,10 +490,11 @@ def _check_expect(matcher, matched: bool, host: str, port: int) -> None:
         )
 
 
-def _received_data(raw: bytes, encoding: str) -> dict[str, Any]:
-    """把原始回包整理成 ``hex``/``text``/``size``。"""
+def _received_data(raw: bytes, encoding: str, chunks: int) -> dict[str, Any]:
+    """把原始回包整理成 ``hex``/``text``/``size``/``chunks``。"""
     return {
         "hex": raw.hex(),
         "text": decode_bytes(raw, encoding),
         "size": len(raw),
+        "chunks": chunks,
     }
