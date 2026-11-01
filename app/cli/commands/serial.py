@@ -29,7 +29,7 @@ from app.cli.reads import (
     read_until,
 )
 from app.cli.transports import serial_io
-from app.core.encoding import decode_bytes, resolve_codec
+from app.core.encoding import decode_bytes, parse_hex, resolve_codec
 
 __all__ = [
     "add_connection_options",
@@ -363,9 +363,10 @@ def _received_data(raw: bytes, encoding: str) -> dict[str, Any]:
 def _register_monitor(subparsers) -> None:
     parser = subparsers.add_parser(
         "monitor",
-        help="持续接收串口数据，按 NDJSON 输出事件（有界）。",
+        help="持续接收串口数据，按 NDJSON 输出事件（有界，不支持 --format text/--pretty）。",
         description="打开串口后循环读取，逐行输出 start/data/end 事件；"
-        "必须用 --duration 限定运行时长，可用 --max-bytes/--max-events/--until 提前结束。",
+        "必须用 --duration 限定运行时长，可用 --max-bytes/--max-events/--until 提前结束。"
+        "输出固定为 NDJSON，--format text 与 --pretty 视为参数错误（退出码 2）。",
     )
     parser.add_argument("--port", required=True, metavar="PORT", help="串口名称，如 COM9。")
     add_connection_options(parser)
@@ -398,12 +399,11 @@ def run_monitor(args) -> dict[str, Any]:
     matcher = make_matcher(
         expect=options.until, expect_hex=options.until_hex, encoding=codec
     )
+    needle_len = _needle_length(options, codec) if matcher is not None else 0
     config = build_config(args)
 
     clock = time.monotonic
-    started = clock()
-    deadline = started + options.duration
-    buffer = bytearray()
+    tail = b""
     total = 0
     events = 0
     matched = False
@@ -411,6 +411,9 @@ def run_monitor(args) -> dict[str, Any]:
     try:
         transport = _new_transport(config)
         _open(transport, config)
+        # 计时从打开成功开始，打开耗时不占用 --duration。
+        started = clock()
+        deadline = started + options.duration
         emit_event(
             {
                 "event": "start",
@@ -446,12 +449,13 @@ def run_monitor(args) -> dict[str, Any]:
 
             if options.max_bytes is not None:
                 budget = options.max_bytes - total
+                if budget <= 0:
+                    break
                 if len(chunk) > budget:
                     chunk = chunk[:budget]
             if not chunk:
                 continue
 
-            buffer.extend(chunk)
             total += len(chunk)
             events += 1
             emit_event(
@@ -464,9 +468,14 @@ def run_monitor(args) -> dict[str, Any]:
                 }
             )
 
-            if matcher is not None and matcher(bytes(buffer)):
-                matched = True
-                break
+            if matcher is not None:
+                # 只在「needle_len - 1」字节的尾部窗口上匹配：跨块命中仍然成立，
+                # 但内存占用与总时长无关（无 --until 时根本不保留数据）。
+                if matcher(tail + chunk):
+                    matched = True
+                    break
+                keep = needle_len - 1
+                tail = (tail + chunk)[-keep:] if keep > 0 else b""
             if options.max_bytes is not None and total >= options.max_bytes:
                 break
             if options.max_events is not None and events >= options.max_events:
@@ -485,6 +494,13 @@ def run_monitor(args) -> dict[str, Any]:
     return summary
 
 
+def _needle_length(options, codec: str) -> int:
+    """把 ``--until``/``--until-hex`` 换算成字节长度，用于收缩匹配窗口。"""
+    if options.until_hex is not None:
+        return len(parse_hex(options.until_hex))
+    return len(options.until.encode(codec))
+
+
 def _config_summary(config) -> dict[str, Any]:
     """连接参数的对外摘要，键名与 CLI 参数一致。"""
     return {
@@ -499,7 +515,7 @@ def _config_summary(config) -> dict[str, Any]:
 
 def _timestamp() -> str:
     """本地时区的 ISO 8601 时间戳，供流式事件的 ``at`` 字段使用。"""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 # ---------------------------------------------------------------------------

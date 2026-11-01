@@ -227,14 +227,49 @@ def test_monitor_until_ends_early(cli, monkeypatch) -> None:
     assert events[-2]["matched"] is True
     assert events[-1]["ok"] is True
     assert [event["hex"] for event in events[1:3]] == ["4f", "4b"]
+    # 命中即停：假时钟下不命中才会读到 --duration 到点（最多 21 次 read）。
     assert _read_count(transport) == 2
+    assert _read_count(transport) <= 21
+    assert transport.closed is True
+
+
+def test_monitor_keeps_matching_window_bounded_on_long_stream(cli, monkeypatch) -> None:
+    clock = FakeClock()
+    chunks = [b"X"] * 100 + [b"O", b"K"]
+    transport = _install(monkeypatch, FakeTransport(chunks, clock=clock))
+    _install_clock(monkeypatch, clock)
+
+    seen: list[int] = []
+    real_make_matcher = serial.make_matcher
+
+    def _spy(**kwargs):
+        matcher = real_make_matcher(**kwargs)
+
+        def wrapped(data):
+            seen.append(len(data))
+            return matcher(data)
+
+        return wrapped
+
+    monkeypatch.setattr(serial, "make_matcher", _spy)
+
+    payload = cli(
+        ["serial", "monitor", "--port", "COM9", "--duration", "6", "--until", "OK"]
+    )
+    assert payload["exit_code"] == 0
+    assert payload["data"]["matched"] is True
+    assert payload["data"]["bytes"] == 102
+    assert payload["data"]["events"] == 102
+    # 匹配窗口只保留 needle 长度 - 1 的尾部：匹配器收到的数据不会随流增长。
+    assert seen and max(seen) <= 2
+    assert _read_count(transport) == 102
     assert transport.closed is True
 
 
 def test_monitor_until_hex_matches_cumulative_bytes(cli, monkeypatch) -> None:
     clock = FakeClock()
     transport = _install(
-        monkeypatch, FakeTransport([b"\x01", b"\x02"], clock=clock)
+        monkeypatch, FakeTransport([b"O", b"K"], clock=clock)
     )
     _install_clock(monkeypatch, clock)
 
@@ -247,13 +282,14 @@ def test_monitor_until_hex_matches_cumulative_bytes(cli, monkeypatch) -> None:
             "--duration",
             "1",
             "--until-hex",
-            "0102",
+            "4F4B",
         ]
     )
     assert payload["exit_code"] == 0
     assert payload["data"]["matched"] is True
     assert payload["data"]["events"] == 2
     assert _read_count(transport) == 2
+    assert transport.closed is True
 
 
 def test_monitor_max_events_ends_early(cli, monkeypatch) -> None:
@@ -409,6 +445,26 @@ def test_monitor_requires_duration(cli, monkeypatch) -> None:
     payload = cli(["serial", "monitor", "--port", "COM9"])
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
+    assert transport.calls == []
+
+
+def test_monitor_rejects_unknown_encoding(cli, monkeypatch) -> None:
+    transport = _install(monkeypatch, FakeTransport())
+    payload = cli(
+        [
+            "serial",
+            "monitor",
+            "--port",
+            "COM9",
+            "--duration",
+            "1",
+            "--encoding",
+            "nope",
+        ]
+    )
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
+    assert "nope" in payload["error"]["message"]
     assert transport.calls == []
 
 
