@@ -121,6 +121,40 @@ def test_value_parsing_follows_default_types(cli) -> None:
         assert payload["error"]["code"] == "invalid_input", (key, raw)
 
 
+def test_get_returns_json_null(cli) -> None:
+    # 默认值为 None 的键必须能正常返回 JSON null，而不是被误判成“不存在”。
+    payload = cli(["config", "get", "--key", "serial.encoding"])
+    assert payload["exit_code"] == 0
+    assert payload["data"] == {"key": "serial.encoding", "value": None}
+
+
+def test_non_finite_values_are_invalid_input(cli) -> None:
+    """容器里的 NaN/±Infinity 也必须拒绝：写进 config.json 后信封不再是标准 JSON。"""
+    path = _config_path(cli)
+    baseline = cli(["config", "set", "--key", "bluetooth.aliases", "--value", '{"COM3": "板卡"}'])
+    assert baseline["exit_code"] == 0
+    before = path.read_text(encoding="utf-8")
+
+    for key, raw in (
+        ("bluetooth.favorites", "[NaN]"),
+        ("bluetooth.aliases", '{"COM3": NaN}'),
+        ("bluetooth.favorites", "[Infinity]"),
+        ("bluetooth.favorites", "[-Infinity]"),
+        ("bluetooth.favorites", "[1e999]"),  # 溢出成 inf 的标准数字字面量
+    ):
+        payload = cli(["config", "set", "--key", key, "--value", raw])
+        assert payload["exit_code"] == 3, (key, raw)
+        assert payload["error"]["code"] == "invalid_input", (key, raw)
+        assert "有限" in payload["error"]["message"], (key, raw)
+        # 校验失败必须发生在保存之前：配置文件保持逐字节不变。
+        assert path.read_text(encoding="utf-8") == before, (key, raw)
+
+    # 合法的容器值仍然可以写入。
+    valid = cli(["config", "set", "--key", "bluetooth.favorites", "--value", '["COM3"]'])
+    assert valid["exit_code"] == 0
+    assert json.loads(path.read_text(encoding="utf-8"))["bluetooth.favorites"] == ["COM3"]
+
+
 def test_unknown_keys(cli) -> None:
     path = _config_path(cli)
     path.write_text(json.dumps({"custom.key": 5}), encoding="utf-8")

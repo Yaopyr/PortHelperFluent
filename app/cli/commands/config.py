@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,7 @@ def _validate_value(key: str, raw: str) -> Any:
         value = json.loads(raw)
     except json.JSONDecodeError:
         value = raw
+    _ensure_finite_value(value, key, raw)
     default = DEFAULT_SETTINGS[key]
     if not _matches_default_type(value, default):
         raise CliError(
@@ -166,6 +168,26 @@ def _validate_value(key: str, raw: str) -> Any:
             EXIT_OPERATION,
         )
     return value
+
+
+def _ensure_finite_value(value: Any, key: str, raw: str) -> None:
+    """递归拒绝 NaN/±Infinity：``json.loads`` 默认接受这些常量与溢出的 ``1e999``。
+
+    这类值一旦写进 config.json，``show``/``get``/``export`` 的信封就不再是标准
+    JSON，下游严格解析器会失败；因此必须在保存前按输入非法（3）拦下。
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise CliError(
+            "invalid_input",
+            f"配置项 {key} 含非有限数值（{raw!r}），配置只接受有限数值。",
+            EXIT_OPERATION,
+        )
+    if isinstance(value, dict):
+        for item in value.values():
+            _ensure_finite_value(item, key, raw)
+    elif isinstance(value, list):
+        for item in value:
+            _ensure_finite_value(item, key, raw)
 
 
 def _matches_default_type(value: Any, default: Any) -> bool:
