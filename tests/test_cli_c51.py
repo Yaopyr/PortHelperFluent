@@ -53,6 +53,14 @@ def _strict_json(text: str) -> dict:
     return json.loads(text, parse_constant=_reject)
 
 
+def _run_strict(argv, capsys) -> tuple[int, dict]:
+    """跑一次 CLI 并严格解析 stdout 信封；出现 NaN/Infinity 时解析直接失败。"""
+    from app.cli.main import run
+
+    code = run(list(argv))
+    return code, _strict_json(capsys.readouterr().out)
+
+
 # ---------------------------------------------------------------------------
 # show-config
 # ---------------------------------------------------------------------------
@@ -270,6 +278,39 @@ def test_bad_config_content_from_file_and_stdin(cli, tmp_path, monkeypatch) -> N
     payload = cli(["c51", "calc", "--config-json", '{"crystal_mhz": 12.5}'])
     assert payload["exit_code"] == 0
     assert payload["data"]["config"]["crystal_mhz"] == 12.5
+
+
+def test_string_nan_is_invalid_input(tmp_path, monkeypatch, capsys) -> None:
+    """``from_dict`` 用 ``float()`` 解析字符串，``"NaN"``/``"nan"`` 也会变成 NaN。"""
+    for literal in ("NaN", "nan"):
+        config_json = f'{{"crystal_mhz": "{literal}"}}'
+
+        code, payload = _run_strict(
+            ["c51", "calc", "--config-json", config_json], capsys
+        )
+        assert code == 3, literal
+        assert payload["error"]["code"] == "invalid_input", literal
+
+        path = tmp_path / f"{literal}.json"
+        path.write_text(config_json, encoding="utf-8")
+        code, payload = _run_strict(["c51", "calc", "--config", str(path)], capsys)
+        assert code == 3, literal
+        assert payload["error"]["code"] == "invalid_input", literal
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(config_json))
+        code, payload = _run_strict(["c51", "calc", "--config", "-"], capsys)
+        assert code == 3, literal
+        assert payload["error"]["code"] == "invalid_input", literal
+
+
+def test_overflowing_integer_is_invalid_input(capsys) -> None:
+    """400 位整数转 ``float`` 会溢出：这是输入问题，不能变成 ``internal``/1。"""
+    huge = "9" * 400
+    code, payload = _run_strict(
+        ["c51", "calc", "--config-json", f'{{"crystal_mhz": {huge}}}'], capsys
+    )
+    assert code == 3
+    assert payload["error"]["code"] == "invalid_input"
 
 
 def test_write_failures_are_permission_denied(cli, tmp_path) -> None:

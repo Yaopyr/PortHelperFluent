@@ -271,14 +271,20 @@ def _config_from_json(text: str, label: str) -> C51Config:
             f"{label}必须是 JSON 对象（键值对），收到 {type(data).__name__}。",
             EXIT_OPERATION,
         )
-    return C51Config.from_dict(data)
+    try:
+        config = C51Config.from_dict(data)
+    except (OverflowError, ValueError) as exc:
+        raise CliError(
+            "invalid_input", f"{label}中的数值超出范围：{exc}", EXIT_OPERATION
+        ) from exc
+    _ensure_config_finite(config, label)
+    return config
 
 
 def _reject_constant(token: str) -> NoReturn:
     """拒绝 ``NaN``/``Infinity``/``-Infinity``：Python 的 ``json`` 默认接受它们。
 
-    ``C51Config.from_dict`` 不会拦下 NaN（比较结果为假，钳位后原样保留），
-    一旦写进信封，stdout 就不再是标准 JSON。
+    这类常量一旦写进信封，stdout 就不再是标准 JSON。
     """
     raise ValueError(f"出现不支持的数值常量 {token}（配置只接受有限数值）")
 
@@ -293,6 +299,18 @@ def _ensure_finite(value: Any) -> None:
     elif isinstance(value, list):
         for item in value:
             _ensure_finite(item)
+
+
+def _ensure_config_finite(config: C51Config, label: str) -> None:
+    """对构造后的有效配置再查一遍：``from_dict`` 会把字符串 ``"NaN"`` 变成 NaN。
+
+    钳位比较对 NaN 恒为假，NaN 因此原样留在 ``crystal_mhz`` 并写进信封；
+    原始 JSON 树里它是字符串，所以必须在 ``to_dict()`` 上复查。
+    """
+    try:
+        _ensure_finite(config.to_dict())
+    except ValueError as exc:
+        raise CliError("invalid_input", f"{label} 无效：{exc}", EXIT_OPERATION) from exc
 
 
 def _write_text(path_value: str, text: str, label: str) -> None:
