@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -36,3 +37,32 @@ def qapp():
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture
+def cli(capsys):
+    """调用 CLI 入口并返回信封 dict（附 ``exit_code`` 键）。
+
+    供所有 CLI 命令测试使用：``cli(["checksum", "--text", "123456789"])["data"]``。
+    非 JSON 输出放在 ``raw`` 键下；流式命令的多行 NDJSON 取最后一行的信封。
+    """
+
+    def _run(argv):
+        # 惰性导入：本 fixture 被任何 CLI 测试使用时才加载 CLI 入口。
+        from app.cli.main import run
+
+        code = run(list(argv))
+        out = capsys.readouterr().out
+        text = out.strip()
+        if text.startswith("{"):
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                lines = [line for line in text.splitlines() if line.strip()]
+                payload = json.loads(lines[-1]) if lines else {}
+                payload["raw"] = out
+            payload["exit_code"] = code
+            return payload
+        return {"raw": out, "exit_code": code}
+
+    return _run
