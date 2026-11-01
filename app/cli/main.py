@@ -24,6 +24,7 @@ from app.cli.commands import (
     convert,
     dotmatrix,
     image,
+    net,
     serial,
     system,
     update,
@@ -68,6 +69,7 @@ def build_parser(
     image.register(subparsers)
     dotmatrix.register(subparsers)
     c51.register(subparsers)
+    net.register(subparsers)
     serial.register(subparsers)
     update.register(subparsers)
     return parser
