@@ -75,10 +75,6 @@ def run(
 
     command = getattr(args, "command", "cli")
     fmt = getattr(args, "format", "json")
-    if fmt not in ("json", "text"):
-        # 个别命令的 --format 描述输入编码（如 convert.palette 的 rgb565/rgb332/rgb888），
-        # 信封始终按 JSON 渲染，避免机器可读输出被误当作文本。
-        fmt = "json"
     pretty = bool(getattr(args, "pretty", False))
     handler = getattr(args, "handler", None)
     if handler is None:

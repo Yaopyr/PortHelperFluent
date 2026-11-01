@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # 红：0xFF 转 RGB565 为 0xF800，转 RGB332 为 0xE0。
 RED_565 = "F800"
 RED_332 = "E0"
+
+
+class _FakeStdin:
+    """替身标准输入：只提供 ``buffer``，与 ``read_input`` 的读取方式一致。"""
+
+    def __init__(self, data: bytes) -> None:
+        self.buffer = io.BytesIO(data)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +110,9 @@ def test_binhex_data_shape_per_mode(cli, tmp_path) -> None:
     assert data["size"] == 3
 
     data = cli(["convert", "binhex", "--mode", "hex-to-bytes", "--hex", "01 02"])["data"]
-    assert set(data) == {"mode", "size", "out"}
+    assert set(data) == {"mode", "size", "hex", "out"}
+    assert data["size"] == 2
+    assert data["hex"] == "01 02"
     assert data["out"] is None
 
     out = tmp_path / "x.bin"
@@ -111,6 +121,27 @@ def test_binhex_data_shape_per_mode(cli, tmp_path) -> None:
     )["data"]
     assert data["out"] == str(out)
     assert out.read_bytes() == b"\x01\x02"
+
+
+def test_binhex_hex_to_bytes_decodes_text_and_stdin(cli, tmp_path, monkeypatch) -> None:
+    """--text/--stdin 给的是十六进制文本，hex-to-bytes 必须先解析再输出原始字节。"""
+    out = tmp_path / "x.bin"
+    text_data = cli(
+        ["convert", "binhex", "--mode", "hex-to-bytes", "--text", "01 02", "--out", str(out)]
+    )["data"]
+    assert text_data["size"] == 2
+    assert text_data["hex"] == "01 02"
+    assert out.read_bytes() == b"\x01\x02"
+
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(b"01 02"))
+    stdin_data = cli(["convert", "binhex", "--mode", "hex-to-bytes", "--stdin"])["data"]
+    assert stdin_data["size"] == 2
+    assert stdin_data["hex"] == "01 02"
+
+    # 文本不是合法十六进制时按输入内容非法处理。
+    payload = cli(["convert", "binhex", "--mode", "hex-to-bytes", "--text", "hello"])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "invalid_input"
 
 
 def test_binhex_writes_only_raw_bytes_for_hex_to_bytes(cli, tmp_path) -> None:
@@ -219,7 +250,7 @@ def test_sevenseg_errors(cli) -> None:
 def test_palette_forward_and_decode(cli) -> None:
     data = cli(["convert", "palette", "--color", "#FF0000"])["data"]
     assert data["rgb565"]["hex"] == "F800" and data["rgb332"]["hex"] == "E0"
-    assert cli(["convert", "palette", "--decode", "0xF800", "--format", "rgb565"])["data"]["rgb"] == [255, 0, 0]
+    assert cli(["convert", "palette", "--decode", "0xF800", "--decode-format", "rgb565"])["data"]["rgb"] == [255, 0, 0]
 
 
 def test_palette_forward_data_shape(cli) -> None:
@@ -240,17 +271,17 @@ def test_palette_rgb_input(cli) -> None:
 
 
 def test_palette_decode_all_formats(cli) -> None:
-    data = cli(["convert", "palette", "--decode", "0xF800", "--format", "rgb565"])["data"]
+    data = cli(["convert", "palette", "--decode", "0xF800", "--decode-format", "rgb565"])["data"]
     assert data["source"] == "decode"
     assert data["rgb"] == [255, 0, 0]
     assert data["hex"] == "#FF0000"
     assert data["rgb565"] == {"value": 0xF800, "hex": RED_565}
 
-    data = cli(["convert", "palette", "--decode", "0xE0", "--format", "rgb332"])["data"]
+    data = cli(["convert", "palette", "--decode", "0xE0", "--decode-format", "rgb332"])["data"]
     assert data["rgb"] == [255, 0, 0]
     assert data["rgb332"] == {"value": 0xE0, "hex": RED_332}
 
-    data = cli(["convert", "palette", "--decode", "0xFF0000", "--format", "rgb888"])["data"]
+    data = cli(["convert", "palette", "--decode", "0xFF0000", "--decode-format", "rgb888"])["data"]
     assert data["rgb"] == [255, 0, 0]
     assert data["rgb888"] == {"value": 0xFF0000, "hex": "FF0000"}
 
@@ -265,11 +296,16 @@ def test_palette_errors(cli) -> None:
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
 
-    # 解码方向必须给出源编码；--format 与 --decode 搭配使用。
+    # 解码方向必须给出源编码，源编码也只能给解码方向。
     payload = cli(["convert", "palette", "--decode", "0xF800"])
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
 
+    payload = cli(["convert", "palette", "--color", "#FF0000", "--decode-format", "rgb565"])
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
+
+    # --format 仍是全局输出格式（json/text），rgb565 不再是合法取值。
     payload = cli(["convert", "palette", "--color", "#FF0000", "--format", "rgb565"])
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
@@ -283,7 +319,7 @@ def test_palette_errors(cli) -> None:
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "invalid_input"
 
-    payload = cli(["convert", "palette", "--decode", "0x1FFFF", "--format", "rgb565"])
+    payload = cli(["convert", "palette", "--decode", "0x1FFFF", "--decode-format", "rgb565"])
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "invalid_input"
 

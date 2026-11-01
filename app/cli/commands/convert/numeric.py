@@ -32,9 +32,11 @@ from app.core.encoding import (
     SEVEN_SEGMENT_BITS,
     base_outputs,
     bin_file_to_hex_text,
+    hex_text_to_bytes,
     hex_text_to_text,
     seven_segment_code,
     seven_segment_segments,
+    to_hex,
 )
 from app.services.exports import write_bytes_atomic
 
@@ -54,10 +56,8 @@ BITS_MIN, BITS_MAX = 1, 64
 # ``binhex --mode`` 的三个方向。
 BINHEX_MODES = ("bin-to-hex", "hex-to-text", "hex-to-bytes")
 
-# ``palette --format``：``json``/``text`` 是信封输出格式，其余是解码源编码。
-# 同一选项承担两种语义，是为了让 ``--decode 0xF800 --format rgb565`` 与其它
-# 叶子命令的 ``--format json|text`` 共存（argparse 不允许同名选项注册两次）。
-PALETTE_FORMATS = ("json", "text", "rgb565", "rgb332", "rgb888")
+# ``palette --decode-format`` 的三个源编码。
+PALETTE_DECODE_FORMATS = ("rgb565", "rgb332", "rgb888")
 
 _SEGMENT_SPLIT = re.compile(r"[,\s]+")
 
@@ -188,14 +188,20 @@ def run_binhex(args) -> dict[str, Any]:
         }
 
     out_path = getattr(args, "out", None)
+    try:
+        # 无论来源是 --hex、--text、--file 还是 --stdin，hex-to-bytes 的语义都是
+        # 「把十六进制文本解成原始字节」，因此一律重新解析 source.text。
+        raw = hex_text_to_bytes(source.text)
+    except ValueError as exc:
+        raise CliError("invalid_input", str(exc), EXIT_OPERATION) from exc
     written: str | None = None
     if out_path is not None:
         try:
-            write_bytes_atomic(Path(out_path), source.data)
+            write_bytes_atomic(Path(out_path), raw)
         except OSError as exc:
             raise CliError("permission_denied", f"写入文件失败：{exc}", EXIT_OPERATION) from exc
         written = str(out_path)
-    return {"mode": mode, "size": len(source.data), "out": written}
+    return {"mode": mode, "size": len(raw), "hex": to_hex(raw), "out": written}
 
 
 # ---------------------------------------------------------------------------
@@ -299,20 +305,15 @@ def _register_palette(subparsers) -> None:
     group.add_argument(
         "--decode",
         metavar="VALUE",
-        help="要解码的源值（十进制或 0x 前缀），必须与 --format rgb565/rgb332/rgb888 搭配。",
+        help="要解码的源值（十进制或 0x 前缀），必须与 --decode-format 搭配。",
     )
     parser.add_argument(
-        "--format",
-        choices=PALETTE_FORMATS,
-        default="json",
-        help="输出格式：json（默认）或 text；配合 --decode 时表示源编码 "
-        "rgb565/rgb332/rgb888，此时信封仍按 JSON 输出。",
+        "--decode-format",
+        choices=PALETTE_DECODE_FORMATS,
+        metavar="FORMAT",
+        help="--decode 的源编码：rgb565、rgb332 或 rgb888。",
     )
-    parser.add_argument(
-        "--pretty",
-        action="store_true",
-        help="json 输出缩进 2 空格，便于人工阅读。",
-    )
+    add_output_options(parser)
     parser.set_defaults(handler=run_palette, command="convert.palette")
 
 
@@ -321,14 +322,13 @@ def run_palette(args) -> dict[str, Any]:
     color = getattr(args, "color", None)
     rgb_text = getattr(args, "rgb", None)
     decode_text = getattr(args, "decode", None)
-    chosen_format = getattr(args, "format", "json") or "json"
-    decode_format = chosen_format if chosen_format in _DECODERS else None
+    decode_format = getattr(args, "decode_format", None)
 
     if decode_text is not None:
         if decode_format is None:
             raise CliError(
                 "usage",
-                "--decode 需要 --format rgb565、rgb332 或 rgb888 指定源编码。",
+                "--decode 需要 --decode-format rgb565、rgb332 或 rgb888 指定源编码。",
                 EXIT_USAGE,
             )
         rgb, origin = _decode_color(decode_text, decode_format), "decode"
@@ -336,7 +336,7 @@ def run_palette(args) -> dict[str, Any]:
         if decode_format is not None:
             raise CliError(
                 "usage",
-                "--format rgb565/rgb332/rgb888 只能与 --decode 一起使用。",
+                "--decode-format 只能与 --decode 一起使用。",
                 EXIT_USAGE,
             )
         if color is not None:
