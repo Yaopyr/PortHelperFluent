@@ -66,12 +66,13 @@ def read_until(
     poll: float = 0.05,
     clock: Callable[[], float] = time.monotonic,
 ) -> ReadOutcome:
-    """在截止时间前反复 ``fetch(poll)`` 累积数据。
+    """在截止时间前反复调用 ``fetch`` 累积数据。
 
     ``fetch(seconds)`` 必须返回 bytes，且最多阻塞 ``seconds`` 秒。给了 ``match`` 时
     截止时间为 ``timeout``，命中即提前结束；没给 ``match`` 时用 ``read_for`` 作为读取
-    窗口（``read_for`` 为 None 时退回 ``timeout``）。``max_bytes`` 一到就把数据截断到
-    该长度并结束；无论如何都不会在超过截止时间后继续循环。
+    窗口（``read_for`` 为 None 时退回 ``timeout``）。每一轮把 ``poll`` 收缩到剩余时间
+    （``fetch(min(poll, 剩余)``），因此单次读取不会越过截止时间；截止时间一到就不再
+    调用 ``fetch``。``max_bytes`` 一到就把数据截断到该长度并结束。
 
     ``chunks`` 只统计返回了非空数据的 ``fetch`` 调用次数（空轮询不计）。
     """
@@ -84,7 +85,12 @@ def read_until(
     matched = False
     timed_out = False
     while True:
-        chunk = fetch(poll)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            # 只有「等待匹配」才算超时；固定读取窗口到点是正常结束。
+            timed_out = match is not None
+            break
+        chunk = fetch(min(poll, remaining))
         if chunk:
             buffer.extend(chunk)
             chunks += 1
@@ -92,10 +98,6 @@ def read_until(
             matched = True
             break
         if max_bytes is not None and len(buffer) >= max_bytes:
-            break
-        if clock() >= deadline:
-            # 只有「等待匹配」才算超时；固定读取窗口到点是正常结束。
-            timed_out = match is not None
             break
 
     data = bytes(buffer)
@@ -120,7 +122,8 @@ def make_matcher(
 
     文本模式按 ``encoding`` 解码累计数据后做子串匹配；十六进制模式直接匹配原始字节，
     因此同一个回包被拆成多次读取（如 ``b"O"``、``b"K"``）也能命中。两个都没给时
-    返回 None；同时给两个视为参数错误。
+    返回 None；同时给两个、或给了空模式（``--expect ""``、只含分隔符的
+    ``--expect-hex``）都视为参数错误——空模式会让任何数据立即「命中」。
     """
     if expect is not None and expect_hex is not None:
         raise CliError(
@@ -133,8 +136,20 @@ def make_matcher(
             needle = parse_hex(expect_hex)
         except ValueError as exc:
             raise CliError("usage", str(exc), EXIT_USAGE) from exc
+        if not needle:
+            raise CliError(
+                "usage",
+                "--expect-hex/--until-hex 解析后为空，请给出至少一个字节。",
+                EXIT_USAGE,
+            )
         return lambda data: needle in data
     if expect is not None:
+        if not expect:
+            raise CliError(
+                "usage",
+                "--expect/--until 的文本不能为空。",
+                EXIT_USAGE,
+            )
         try:
             codec = resolve_codec(encoding or "utf-8")
         except ValueError as exc:

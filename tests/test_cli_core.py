@@ -343,7 +343,7 @@ def test_read_until_stops_at_max_bytes_and_read_for() -> None:
     assert outcome.chunks == 4
     assert outcome.elapsed_s == pytest.approx(0.2)
 
-    # 单次 fetch 就跨越截止时间时不再循环。
+    # 单次 fetch 就跨越截止时间时不再循环：poll 收缩到剩余时间（0.2 秒），不会越界。
     now[0] = 0.0
     calls: list[float] = []
 
@@ -353,8 +353,9 @@ def test_read_until_stops_at_max_bytes_and_read_for() -> None:
         return b"x"
 
     outcome = read_until(slow_fetch, timeout=10, read_for=0.2, poll=0.5, clock=clock)
-    assert calls == [0.5]
+    assert calls == [0.2]
     assert outcome.data == b"x" and outcome.chunks == 1
+    assert outcome.elapsed_s == pytest.approx(0.2)
 
 
 def test_make_matcher_hex_and_text() -> None:
@@ -378,6 +379,20 @@ def test_make_matcher_hex_and_text() -> None:
         make_matcher(expect="OK", expect_hex="4F 4B")
     assert excinfo.value.code == "usage"
     assert excinfo.value.exit_code == EXIT_USAGE
+
+
+def test_make_matcher_rejects_empty_patterns() -> None:
+    # 空模式会让任何数据立即「命中」，必须当参数错误拦下。
+    with pytest.raises(CliError) as excinfo:
+        make_matcher(expect="")
+    assert excinfo.value.code == "usage"
+    assert excinfo.value.exit_code == EXIT_USAGE
+
+    for empty_hex in ("", "   ", " , \n\t"):
+        with pytest.raises(CliError) as excinfo:
+            make_matcher(expect_hex=empty_hex)
+        assert excinfo.value.code == "usage"
+        assert excinfo.value.exit_code == EXIT_USAGE
 
 
 # ---------------------------------------------------------------------------
