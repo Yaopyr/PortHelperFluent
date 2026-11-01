@@ -100,6 +100,70 @@ def _kinds(events: list[dict]) -> list[str]:
     return [str(event.get("event")) for event in events[:-1]]
 
 
+def _install_socket_failure(monkeypatch, *, send=None, recv=None):
+    """给 ``net_io`` 的监听 socket 与 accept 到的客户端注入一次性故障。
+
+    钩子只在第一次触发后失效，之后委托给真实 socket；函数返回真实的 socket 类，
+    客户端要用它自己建连接（``monkeypatch`` 改掉的是全局的 ``socket.socket``）。
+    """
+    real_socket = socket.socket
+    hooks = {"sendall": send, "recv": recv}
+
+    class _WrappedConn:
+        def __init__(self, sock: socket.socket) -> None:
+            self._sock = sock
+
+        def __getattr__(self, name):
+            return getattr(self._sock, name)
+
+        def sendall(self, data: bytes) -> None:
+            hook = hooks["sendall"]
+            if hook is not None:
+                hooks["sendall"] = None
+                hook()
+            self._sock.sendall(data)
+
+        def recv(self, size: int) -> bytes:
+            hook = hooks["recv"]
+            if hook is not None:
+                hooks["recv"] = None
+                hook()
+            return self._sock.recv(size)
+
+    class _WrappedListener:
+        def __init__(self, *args, **kwargs) -> None:
+            self._sock = real_socket(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._sock, name)
+
+        def accept(self):
+            conn, peer = self._sock.accept()
+            return _WrappedConn(conn), peer
+
+    monkeypatch.setattr(net_io.socket, "socket", _WrappedListener)
+    return real_socket
+
+
+def _storm_clients(
+    port: int, *, count: int = 40, budget: float = 0.6
+) -> list[socket.socket]:
+    """在预算时间内尽力建立 ``count`` 个连接（被内核拒绝时短暂重试）。"""
+    deadline = time.monotonic() + budget
+    clients: list[socket.socket] = []
+    while len(clients) < count and time.monotonic() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1.0)
+        try:
+            sock.connect(("127.0.0.1", port))
+        except OSError:
+            sock.close()
+            time.sleep(0.005)
+            continue
+        clients.append(sock)
+    return clients
+
+
 # ---------------------------------------------------------------------------
 # 传输层
 # ---------------------------------------------------------------------------
@@ -188,6 +252,186 @@ def test_serve_tcp_echo_events_and_summary() -> None:
         again.bind(("127.0.0.1", ports[0]))
     finally:
         again.close()
+
+
+def test_serve_tcp_slow_client_is_dropped_not_fatal(monkeypatch) -> None:
+    """发送超时只丢弃该客户端：服务端继续运行到 duration，不报 connection_failed。"""
+
+    def raise_timeout() -> None:
+        raise TimeoutError("模拟发送超时")
+
+    real_socket = _install_socket_failure(monkeypatch, send=raise_timeout)
+    events: list[dict] = []
+    ports: list[int] = []
+    ready = threading.Event()
+    summary: dict = {}
+    failures: list[BaseException] = []
+
+    def on_listening(port: int) -> None:
+        ports.append(port)
+        ready.set()
+
+    def run_server() -> None:
+        try:
+            summary.update(
+                net_io.serve_tcp(
+                    "127.0.0.1",
+                    0,
+                    duration=1,
+                    max_clients=4,
+                    emit=events.append,
+                    echo=True,
+                    on_listening=on_listening,
+                )
+            )
+        except BaseException as exc:  # 测试要断言服务端没有把错误抛出去
+            failures.append(exc)
+
+    server = threading.Thread(target=run_server, daemon=True)
+    server.start()
+    try:
+        assert ready.wait(timeout=3)
+        client = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.settimeout(2)
+            client.connect(("127.0.0.1", ports[0]))
+            client.sendall(b"hi")
+            try:
+                assert client.recv(64) == b""
+            except OSError:
+                pass
+        finally:
+            client.close()
+    finally:
+        server.join(timeout=5)
+    assert not server.is_alive()
+    assert failures == []
+
+    kinds = [event["event"] for event in events]
+    assert kinds[0] == "listening"
+    assert kinds[-1] == "end"
+    assert "client_data" in kinds
+    assert kinds.count("client_disconnected") >= 1
+    assert not [event for event in events if event.get("event") == "error"]
+    assert summary["clients"] == 1
+    assert summary["bytes_received"] == 2
+    assert summary["bytes_sent"] == 0
+    assert summary["events"] == 1
+
+
+def test_serve_tcp_reset_client_is_disconnect(monkeypatch) -> None:
+    """recv 被对端重置按客户端断开处理：不发全局 error、不终止服务端。"""
+
+    def raise_reset() -> None:
+        raise ConnectionResetError("模拟对端重置")
+
+    real_socket = _install_socket_failure(monkeypatch, recv=raise_reset)
+    events: list[dict] = []
+    ports: list[int] = []
+    ready = threading.Event()
+    summary: dict = {}
+    failures: list[BaseException] = []
+
+    def on_listening(port: int) -> None:
+        ports.append(port)
+        ready.set()
+
+    def run_server() -> None:
+        try:
+            summary.update(
+                net_io.serve_tcp(
+                    "127.0.0.1",
+                    0,
+                    duration=1,
+                    max_clients=4,
+                    emit=events.append,
+                    on_listening=on_listening,
+                )
+            )
+        except BaseException as exc:  # 测试要断言服务端没有把错误抛出去
+            failures.append(exc)
+
+    server = threading.Thread(target=run_server, daemon=True)
+    server.start()
+    try:
+        assert ready.wait(timeout=3)
+        client = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.settimeout(2)
+            client.connect(("127.0.0.1", ports[0]))
+            client.sendall(b"x")
+            try:
+                client.recv(64)
+            except OSError:
+                pass
+        finally:
+            client.close()
+    finally:
+        server.join(timeout=5)
+    assert not server.is_alive()
+    assert failures == []
+
+    kinds = [event["event"] for event in events]
+    assert kinds[0] == "listening"
+    assert kinds[-1] == "end"
+    assert kinds.count("client_disconnected") >= 1
+    assert not [event for event in events if event.get("event") == "error"]
+    assert summary["clients"] == 1
+    assert summary["bytes_received"] == 0
+    assert summary["bytes_sent"] == 0
+
+
+def test_serve_tcp_connection_storm_is_bounded(monkeypatch) -> None:
+    """40 个并发连接 + max_clients 2：拒绝事件受全局上限约束，服务按 duration 结束。"""
+    monkeypatch.setattr(net_io, "MAX_ERROR_EVENTS", 3)
+    events: list[dict] = []
+    ports: list[int] = []
+    ready = threading.Event()
+    summary: dict = {}
+    failures: list[BaseException] = []
+
+    def on_listening(port: int) -> None:
+        ports.append(port)
+        ready.set()
+
+    def run_server() -> None:
+        try:
+            summary.update(
+                net_io.serve_tcp(
+                    "127.0.0.1",
+                    0,
+                    duration=1,
+                    max_clients=2,
+                    emit=events.append,
+                    on_listening=on_listening,
+                )
+            )
+        except BaseException as exc:  # 测试要断言连接风暴没有把服务端打崩
+            failures.append(exc)
+
+    started = time.monotonic()
+    server = threading.Thread(target=run_server, daemon=True)
+    server.start()
+    clients: list[socket.socket] = []
+    try:
+        assert ready.wait(timeout=3)
+        clients = _storm_clients(ports[0], count=40)
+    finally:
+        for sock in clients:
+            sock.close()
+        server.join(timeout=5)
+    elapsed = time.monotonic() - started
+    assert not server.is_alive()
+    assert failures == []
+
+    errors = [event for event in events if event.get("event") == "error"]
+    assert all(event["code"] == "max_clients" for event in errors)
+    assert len(errors) <= 3
+    assert len(errors) == min(summary["rejected"], 3)
+    assert summary["clients"] == 2
+    assert summary["rejected"] >= 3
+    assert 0.9 <= summary["duration_s"] <= 2.0
+    assert 0.9 <= elapsed <= 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +581,7 @@ def test_cli_server_max_clients_rejects_extra(cli) -> None:
 
     summary = payload["data"]
     assert summary["clients"] == 1
+    assert summary["rejected"] == 1
     assert summary["bytes_received"] == 2
     assert summary["bytes_sent"] == 2
 
@@ -369,16 +614,16 @@ def test_cli_server_max_bytes_ends_early(cli) -> None:
     events = _events(payload)
     assert _kinds(events)[-1] == "end"
 
+    # 内核可能把一次 sendall 拆成多个块，因此按累计字节而非「单次 recv 整块」断言。
     data_events = [event for event in events if event.get("event") == "client_data"]
-    assert len(data_events) == 1
-    assert data_events[0]["hex"] == "61626364"
-    assert data_events[0]["size"] == 4
+    assert sum(event["size"] for event in data_events) == 4
+    assert "".join(event["hex"] for event in data_events) == "61626364"
 
     summary = payload["data"]
     assert summary["bytes_received"] == 4
-    assert summary["events"] == 1
+    assert summary["events"] == len(data_events)
     assert summary["duration_s"] < 0.8
-    assert payload["elapsed_ms"] < 900
+    assert payload["elapsed_ms"] < 1500
 
 
 def test_cli_server_max_events_ends_early(cli) -> None:
@@ -411,11 +656,16 @@ def test_cli_server_max_events_ends_early(cli) -> None:
         )
 
     assert payload["exit_code"] == 0
+    events = _events(payload)
+    data_events = [event for event in events if event.get("event") == "client_data"]
     summary = payload["data"]
+    # 单次 sendall 可能被内核拆包，这里只断言「1 个事件」与累计字节。
     assert summary["events"] == 1
-    assert summary["bytes_received"] == 3
+    assert len(data_events) == 1
+    assert summary["bytes_received"] == data_events[0]["size"]
+    assert summary["bytes_received"] < 6
     assert summary["duration_s"] < 0.8
-    assert payload["elapsed_ms"] < 900
+    assert payload["elapsed_ms"] < 1500
 
 
 def test_cli_server_connection_failed(cli) -> None:

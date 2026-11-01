@@ -30,6 +30,10 @@ CONNECT_TIMEOUT_FALLBACK = 5.0
 TCP_RECV_CHUNK = 4096
 # UDP 数据报最大 65507 字节，读满上限避免截断。
 UDP_RECV_CHUNK = 65535
+# 服务端单轮 select 后可读时最多 accept 的批次数：连接风暴也不让一轮占满循环。
+ACCEPT_BATCH = 32
+# 拒绝连接时 error 事件的全局上限：超出后只关闭新连接，不再放大 NDJSON。
+MAX_ERROR_EVENTS = 100
 
 
 def _clock() -> float:
@@ -236,27 +240,34 @@ def serve_tcp(
     """在 ``host:port`` 上有界地提供 TCP 服务，按 NDJSON 事件输出结果。
 
     绑定成功后回调 ``on_listening(实际端口)`` 并发 ``listening`` 事件；此后每轮
-    ``select`` 等待 ``min(POLL, 剩余时长)``，监听 socket 可读时 accept，客户端可读时
-    ``recv``。非空数据发 ``client_data``（``address``/``hex``/``text``/``size``/
-    ``at``），``echo`` 原样回发、``reply`` 回发固定文本（二者互斥，``echo`` 优先）；
-    新客户端发 ``client_connected``，给了 ``greeting`` 时立即发送；对端关闭时注销
-    并发 ``client_disconnected``。连接数已达 ``max_clients`` 时只发
-    ``code=max_clients`` 的 ``error`` 事件并立刻关闭该新 socket，不纳入统计。
+    ``select`` 等待 ``min(POLL, 剩余时长)``，监听 socket 可读时按
+    :data:`ACCEPT_BATCH` 分批 accept（批内也检查截止时间），客户端可读时 ``recv``。
+    非空数据发 ``client_data``（``address``/``hex``/``text``/``size``/``at``），
+    ``echo`` 原样回发、``reply`` 回发固定文本（二者互斥，``echo`` 优先）；新客户端发
+    ``client_connected``，给了 ``greeting`` 时立即发送；对端关闭、发 ``recv`` 被重置
+    或发送失败都按「该客户端断开」处理：注销、关闭并发 ``client_disconnected``，不会
+    终止服务端。连接数已达 ``max_clients`` 时拒绝新连接：最多写
+    :data:`MAX_ERROR_EVENTS` 条 ``code=max_clients`` 的 ``error`` 事件，超出后只关闭
+    新连接；被拒绝的都计入 ``rejected``，不进入 ``clients``。
 
     结束条件：``duration`` 到点、累计字节达到 ``max_bytes``（截断最后一个块）或
     ``client_data`` 事件达到 ``max_events``。结束时发 ``end`` 并返回汇总
-    （``port``/``clients``/``bytes_received``/``bytes_sent``/``duration_s``/``events``）。
-    ``clients`` 是成功接入的客户端累计数（被拒绝的不计）。绑定失败只抛
-    ``connection_failed``；收发过程中的 ``OSError`` 先发 ``error`` 事件再抛
-    ``CliError``。所有 socket 都在 ``finally`` 里关闭。
+    （``port``/``clients``/``bytes_received``/``bytes_sent``/``duration_s``/``events``/
+    ``rejected``）。``clients`` 是成功接入的客户端累计数，``rejected`` 是被
+    ``max_clients`` 拒绝的总数。绑定失败只抛 ``connection_failed``；读取过程中的
+    其它 ``OSError`` 先发 ``error`` 事件再抛 ``CliError``。所有 socket 都在
+    ``finally`` 里关闭。
     """
-    selector = selectors.DefaultSelector()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    selector: selectors.BaseSelector | None = None
+    listener: socket.socket | None = None
     clients: dict[socket.socket, str] = {}
     try:
+        selector = selectors.DefaultSelector()
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             listener.bind((host, port))
-            listener.listen(max(max_clients, 1))
+            # 监听队列按批量上限留足空位，连接风暴不会先被内核拒绝。
+            listener.listen(max(max_clients, ACCEPT_BATCH))
             listener.setblocking(False)
         except OSError as exc:
             raise CliError(
@@ -284,6 +295,8 @@ def serve_tcp(
         sent = 0
         data_events = 0
         clients_total = 0
+        rejected = 0
+        error_events = 0
         while True:
             remaining = deadline - _clock()
             if remaining <= 0:
@@ -291,7 +304,8 @@ def serve_tcp(
             stop = False
             for key, _mask in selector.select(min(POLL, remaining)):
                 if key.fileobj is listener:
-                    while True:
+                    accepted = 0
+                    while accepted < ACCEPT_BATCH and deadline - _clock() > 0:
                         try:
                             conn, peer = listener.accept()
                         except (BlockingIOError, TimeoutError):
@@ -300,17 +314,21 @@ def serve_tcp(
                             raise _connection_failed(
                                 emit, f"接受 {host}:{actual_port} 的新连接失败：{exc}"
                             ) from exc
+                        accepted += 1
                         address = f"{peer[0]}:{peer[1]}"
                         if len(clients) >= max_clients:
-                            emit(
-                                {
-                                    "event": "error",
-                                    "code": "max_clients",
-                                    "message": f"客户端数量已达上限 {max_clients}，"
-                                    f"拒绝 {address}。",
-                                    "at": _timestamp(),
-                                }
-                            )
+                            rejected += 1
+                            if error_events < MAX_ERROR_EVENTS:
+                                error_events += 1
+                                emit(
+                                    {
+                                        "event": "error",
+                                        "code": "max_clients",
+                                        "message": f"客户端数量已达上限 {max_clients}，"
+                                        f"拒绝 {address}。",
+                                        "at": _timestamp(),
+                                    }
+                                )
                             _close_socket(conn)
                             continue
                         conn.settimeout(POLL)
@@ -325,9 +343,18 @@ def serve_tcp(
                             }
                         )
                         if greeting:
-                            sent += _send_chunk(
-                                conn, greeting.encode("utf-8"), address, emit
-                            )
+                            body = greeting.encode("utf-8")
+                            if _send_chunk(conn, body):
+                                sent += len(body)
+                            else:
+                                _drop_client(selector, clients, conn)
+                                emit(
+                                    {
+                                        "event": "client_disconnected",
+                                        "address": address,
+                                        "at": _timestamp(),
+                                    }
+                                )
                     continue
 
                 conn = key.fileobj
@@ -336,6 +363,9 @@ def serve_tcp(
                     chunk = conn.recv(TCP_RECV_CHUNK)
                 except TimeoutError:
                     continue
+                except (ConnectionResetError, ConnectionAbortedError):
+                    # 对端重置连接同样是「这个客户端断开」，不是服务端失败。
+                    chunk = b""
                 except OSError as exc:
                     raise _connection_failed(
                         emit, f"从 {address} 接收数据失败：{exc}"
@@ -371,11 +401,25 @@ def serve_tcp(
                         "at": _timestamp(),
                     }
                 )
+                delivered = True
                 if echo:
-                    sent += _send_chunk(conn, chunk, address, emit)
+                    delivered = _send_chunk(conn, chunk)
+                    if delivered:
+                        sent += len(chunk)
                 elif reply is not None:
-                    sent += _send_chunk(
-                        conn, reply.encode("utf-8"), address, emit
+                    body = reply.encode("utf-8")
+                    delivered = _send_chunk(conn, body)
+                    if delivered:
+                        sent += len(body)
+                if not delivered:
+                    # 慢客户端/大回包的写超时只丢弃这一个客户端，服务端继续运行。
+                    _drop_client(selector, clients, conn)
+                    emit(
+                        {
+                            "event": "client_disconnected",
+                            "address": address,
+                            "at": _timestamp(),
+                        }
                     )
 
                 if max_events is not None and data_events >= max_events:
@@ -394,23 +438,19 @@ def serve_tcp(
             "bytes_sent": sent,
             "duration_s": round(max(_clock() - started, 0.0), 3),
             "events": data_events,
+            "rejected": rejected,
         }
         emit({"event": "end", **summary, "at": _timestamp()})
         return summary
     finally:
         for conn in list(clients):
-            try:
-                selector.unregister(conn)
-            except (KeyError, ValueError):
-                pass
+            _forget_socket(selector, conn)
             _close_socket(conn)
         clients.clear()
-        try:
-            selector.unregister(listener)
-        except (KeyError, ValueError):
-            pass
+        _forget_socket(selector, listener)
         _close_socket(listener)
-        selector.close()
+        if selector is not None:
+            selector.close()
 
 
 # ---------------------------------------------------------------------------
@@ -431,18 +471,16 @@ def _connection_failed(emit: Callable[[dict], None], message: str) -> CliError:
     return CliError("connection_failed", message, EXIT_OPERATION)
 
 
-def _send_chunk(
-    conn: socket.socket,
-    payload: bytes,
-    address: str,
-    emit: Callable[[dict], None],
-) -> int:
-    """向客户端写出 ``payload``，返回写出的字节数；失败时转成 ``connection_failed``。"""
+def _send_chunk(conn: socket.socket, payload: bytes) -> bool:
+    """向客户端写出 ``payload``；成功返回 True，失败（含写超时）返回 False。
+
+    调用方把 ``False`` 当作「该客户端断开」处理，不升级成服务端失败。
+    """
     try:
         conn.sendall(payload)
-    except OSError as exc:
-        raise _connection_failed(emit, f"向 {address} 发送数据失败：{exc}") from exc
-    return len(payload)
+    except OSError:
+        return False
+    return True
 
 
 def _drop_client(
@@ -452,15 +490,26 @@ def _drop_client(
 ) -> None:
     """注销并关闭一个已经断开的客户端（关闭失败静默）。"""
     clients.pop(conn, None)
-    try:
-        selector.unregister(conn)
-    except (KeyError, ValueError):
-        pass
+    _forget_socket(selector, conn)
     _close_socket(conn)
 
 
-def _close_socket(sock: socket.socket) -> None:
+def _forget_socket(
+    selector: selectors.BaseSelector | None, sock: socket.socket | None
+) -> None:
+    """从 selector 注销 socket；未注册或 selector/socket 缺失时静默。"""
+    if selector is None or sock is None:
+        return
+    try:
+        selector.unregister(sock)
+    except (KeyError, ValueError):
+        pass
+
+
+def _close_socket(sock: socket.socket | None) -> None:
     """关闭 socket；关闭阶段的 ``OSError`` 不影响最终汇总。"""
+    if sock is None:
+        return
     try:
         sock.close()
     except OSError:
