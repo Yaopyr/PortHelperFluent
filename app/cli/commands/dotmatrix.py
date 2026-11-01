@@ -3,7 +3,8 @@
 - ``text``：文字 → 分页点阵 → 一个 ``.c`` 或 ``.bin``，可用 ``--toggle`` 手工翻转单元格；
 - ``bmp``：一张图片 → 单页点阵 → 一个 ``.c`` 或 ``.bin``；
 - ``batch``：文件夹内每张图片各自生成一个独立 ``.c``（文件名取输入 stem），
-  单张图片失败只记入 ``errors``，不中断其余文件。
+  单张图片失败只记入 ``errors``（含 ``kind`` 与原因），不中断其余文件；一张都没
+  成功时按失败原因给出 ``invalid_input``（读图失败）或 ``permission_denied``（写不出）。
 
 渲染、分页、扫描排列与位序打包都来自 :mod:`app.core.fontmatrix`（与 GUI 同一套
 实现），本模块只做参数映射、编辑与结果组装。
@@ -173,7 +174,7 @@ def _register_batch(subparsers) -> None:
 
 
 def batch(args) -> dict[str, Any]:
-    """把文件夹内每张图片导出为独立 C 文件，返回累计统计、失败原因与文件列表。"""
+    """把文件夹内每张图片导出为独立 C 文件，返回累计统计、逐文件失败原因与文件列表。"""
     from app.core.fontmatrix import matrix_from_image, matrix_to_bytes, matrix_to_c
     from app.core.imaging import list_image_files
 
@@ -198,19 +199,27 @@ def batch(args) -> dict[str, Any]:
 
     out_dir = Path(getattr(args, "out_dir"))
     files: list[str] = []
-    errors: dict[str, str] = {}
+    errors: dict[str, dict[str, str]] = {}
     pages_count = width = height = total_bytes = 0
     for source in paths:
+        name = source.stem or DEFAULT_NAME
+        target = unique_path(
+            out_dir / f"{sanitize_name(name, fallback=DEFAULT_NAME)}{_SUFFIXES['c']}"
+        )
         try:
+            # 取模与生成 C 文本都属于“读输入”，失败应归到输入非法。
             matrix = matrix_from_image(source, params)
-            name = source.stem or DEFAULT_NAME
-            target = unique_path(
-                out_dir / f"{sanitize_name(name, fallback=DEFAULT_NAME)}{_SUFFIXES['c']}"
+            text = matrix_to_c([matrix], params, name)
+        except ValueError as exc:
+            errors[str(source)] = _failure("invalid_input", f"{source}：{_reason(exc)}")
+            continue
+        try:
+            write_text_atomic(target, text)
+        except OSError as exc:
+            # 写出失败单独记录：原因在输出目录/磁盘，与输入图片无关。
+            errors[str(source)] = _failure(
+                "permission_denied", f"{source}（写出 {target}）：{_reason(exc)}"
             )
-            write_text_atomic(target, matrix_to_c([matrix], params, name))
-        except (ValueError, OSError) as exc:
-            # 单张图片失败只记录原因，继续处理其余文件。
-            errors[str(source)] = str(exc).strip() or type(exc).__name__
             continue
         files.append(str(target))
         pages_count += 1
@@ -218,13 +227,7 @@ def batch(args) -> dict[str, Any]:
         height = max(height, matrix.rows)
         total_bytes += len(matrix_to_bytes(matrix, params))
     if not files:
-        source, reason = next(iter(errors.items()))
-        raise CliError(
-            "invalid_input",
-            f"文件夹中的图片都无法导出：{folder}（{Path(source).name}：{reason}）。",
-            EXIT_OPERATION,
-            details={"errors": errors},
-        )
+        raise _all_failed(folder, out_dir, errors)
     return {
         "pages": pages_count,
         "width": width,
@@ -233,6 +236,36 @@ def batch(args) -> dict[str, Any]:
         "files": files,
         "errors": errors,
     }
+
+
+def _reason(exc: Exception) -> str:
+    """异常的一行可读原因；空消息时退回异常类型名。"""
+    return str(exc).strip() or type(exc).__name__
+
+
+def _failure(kind: str, message: str) -> dict[str, str]:
+    """单文件失败记录：``kind`` 区分输入问题与写出问题，消息点名路径与原因。"""
+    return {"kind": kind, "message": message}
+
+
+def _all_failed(folder: Path, out_dir: Path, errors: dict[str, dict[str, str]]) -> CliError:
+    """一张都没成功时按失败原因给出错误码：有写出失败就归到输出目录。"""
+    write_failures = [key for key, item in errors.items() if item["kind"] == "permission_denied"]
+    if write_failures:
+        return CliError(
+            "permission_denied",
+            f"无法写出任何点阵文件：{out_dir}。{errors[write_failures[0]]['message']}"
+            " 请检查输出目录是否存在、是否为目录以及是否有写入权限。",
+            EXIT_OPERATION,
+            details={"errors": errors},
+        )
+    first = next(iter(errors))
+    return CliError(
+        "invalid_input",
+        f"文件夹中的图片都无法导出：{folder}。{errors[first]['message']}",
+        EXIT_OPERATION,
+        details={"errors": errors},
+    )
 
 
 # ---------------------------------------------------------------------------

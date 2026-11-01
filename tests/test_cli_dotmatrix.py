@@ -489,8 +489,28 @@ def test_batch_collects_errors_without_aborting(cli, tmp_path) -> None:
     assert data["files"] == [str(tmp_path / "out" / "good.c")]
     assert data["pages"] == 1 and data["bytes"] == 8
     assert list(data["errors"]) == [str(bad)]
-    assert "无法读取图片" in data["errors"][str(bad)]
+    # 每个失败都带 kind：坏图属于输入问题，而不是写出问题。
+    assert data["errors"][str(bad)]["kind"] == "invalid_input"
+    assert "无法读取图片" in data["errors"][str(bad)]["message"]
     assert str(good) not in data["errors"]
+
+
+def test_batch_write_failure_reports_permission_denied(cli, tmp_path) -> None:
+    """``--out-dir`` 指向普通文件时，失败原因是写出目标，不能算到输入图片头上。"""
+    folder = tmp_path / "src"
+    folder.mkdir()
+    source = _bmp(folder / "solid.bmp", 0)
+    out_file = tmp_path / "not_a_dir.txt"
+    out_file.write_text("not a directory", encoding="utf-8")
+
+    payload = cli(
+        ["dotmatrix", "batch", "--folder", str(folder), "--out-dir", str(out_file)]
+    )
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "permission_denied"
+    errors = payload["error"]["details"]["errors"]
+    assert errors[str(source)]["kind"] == "permission_denied"
+    assert str(out_file) in errors[str(source)]["message"]
 
 
 def test_batch_error_paths(cli, tmp_path) -> None:
@@ -512,15 +532,19 @@ def test_batch_error_paths(cli, tmp_path) -> None:
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "invalid_input"
 
-    # 全部图片都读不了：没有可用输出，仍是输入非法（3）。
+    # 全部图片都读不了：没有可用输出，错误码按原因归到输入非法（3），并附逐文件原因。
     broken_dir = tmp_path / "broken"
     broken_dir.mkdir()
-    (broken_dir / "bad.bmp").write_bytes(b"not an image")
+    bad = broken_dir / "bad.bmp"
+    bad.write_bytes(b"not an image")
     payload = cli(
         ["dotmatrix", "batch", "--folder", str(broken_dir), "--out-dir", out_dir]
     )
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "invalid_input"
+    errors = payload["error"]["details"]["errors"]
+    assert errors[str(bad)]["kind"] == "invalid_input"
+    assert "无法读取图片" in errors[str(bad)]["message"]
 
     # 缺 --out-dir：用法错误（2）。
     assert cli(["dotmatrix", "batch", "--folder", str(empty)])["exit_code"] == 2
