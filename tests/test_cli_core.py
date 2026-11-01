@@ -165,6 +165,45 @@ def test_configure_stdio_keeps_utf8_output(capsys) -> None:
     assert capsys.readouterr().out.strip() == "中文"
 
 
+class _RecordingStream:
+    """记录 ``reconfigure`` 调用的替身标准流；``encoding`` 可为 None（缺失）。"""
+
+    def __init__(self, encoding: str | None) -> None:
+        self.encoding = encoding
+        self.calls: list[dict] = []
+
+    def reconfigure(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "UTF-8", "utf8", "utf_8"])
+def test_configure_stdio_leaves_utf8_streams_alone(monkeypatch, encoding: str) -> None:
+    """已经是 UTF-8 的流不调用 reconfigure：pytest 捕获流会因此丢掉汇总行。"""
+    fake_stdout = _RecordingStream(encoding)
+    fake_stderr = _RecordingStream(None)  # encoding 缺失的替身同样不动
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    monkeypatch.setattr(sys, "stderr", fake_stderr)
+
+    configure_stdio()
+
+    assert fake_stdout.calls == []
+    assert fake_stderr.calls == []
+
+
+def test_configure_stdio_reconfigures_non_utf8_streams(monkeypatch) -> None:
+    fake_stdout = _RecordingStream("cp936")
+    fake_stderr = _RecordingStream(None)
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    monkeypatch.setattr(sys, "stderr", fake_stderr)
+
+    configure_stdio()
+
+    assert fake_stdout.calls == [
+        {"encoding": "utf-8", "errors": "replace", "newline": "\n"}
+    ]
+    assert fake_stderr.calls == []
+
+
 def test_add_output_options_defaults_and_choices() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     add_output_options(parser)

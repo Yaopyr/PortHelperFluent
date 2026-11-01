@@ -23,17 +23,31 @@ __all__ = [
 ]
 
 
+# `sys.stdout.encoding` 可能写成 `utf-8` / `UTF8` / `utf_8`，按下表归一后比较。
+_UTF8_ENCODINGS = frozenset({"utf-8", "utf8"})
+
+
 def configure_stdio() -> None:
     """把 stdout/stderr 固定为 UTF-8（``errors="replace"``、换行 ``\\n``）。
 
-    Windows 控制台的代码页不再影响管道输出；冻结后的 exe 也一样。重定向到非文本
-    流（如 ``sys.stdout = None``）或没有 ``reconfigure`` 的替身时直接跳过。
+    Windows 控制台的代码页不再影响管道输出；冻结后的 exe 也一样。已经是 UTF-8 的
+    流保持原样：对捕获流（pytest 的 `sys.stdout`）调用 ``reconfigure`` 会顶掉它自己的
+    收尾输出，"N passed" 汇总行就会消失。流为 ``None``、没有 ``reconfigure`` 或
+    ``encoding`` 缺失/为空时无法判断，同样直接跳过。
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
+        encoding = getattr(stream, "encoding", None)
+        if reconfigure is None or not isinstance(encoding, str) or not encoding.strip():
+            continue
+        if _is_utf8(encoding):
             continue
         reconfigure(encoding="utf-8", errors="replace", newline="\n")
+
+
+def _is_utf8(encoding: str) -> bool:
+    """把 ``utf-8`` / ``UTF8`` / ``utf_8`` 等写法归一后判断是否为 UTF-8。"""
+    return encoding.strip().lower().replace("_", "-") in _UTF8_ENCODINGS
 
 
 def envelope_ok(command: str, data: Any, elapsed_ms: int) -> dict[str, Any]:
