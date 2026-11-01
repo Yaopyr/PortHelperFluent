@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -234,10 +235,11 @@ def run_send(args) -> dict[str, Any]:
     payload = data.data + _LINE_ENDINGS[str(getattr(args, "line_ending", "none"))]
     config = build_config(args)
 
-    transport = serial_io.open_transport()
+    transport = None
     matched = False
     outcome = None
     try:
+        transport = _new_transport(config)
         _open(transport, config)
         try:
             _apply_lines(transport, args)
@@ -254,7 +256,8 @@ def run_send(args) -> dict[str, Any]:
                 EXIT_OPERATION,
             ) from exc
     finally:
-        _close(transport)
+        if transport is not None:
+            _close(transport)
 
     if matcher is not None and not matched:
         raise CliError(
@@ -283,12 +286,16 @@ def _validate_send_args(args) -> tuple[int, int, float, float]:
         raise CliError("usage", f"--interval-ms 不能为负数，收到 {interval_ms}。", EXIT_USAGE)
 
     timeout = float(getattr(args, "timeout", 5))
-    if timeout < 0:
-        raise CliError("usage", f"--timeout 不能为负数，收到 {timeout}。", EXIT_USAGE)
+    if not math.isfinite(timeout) or timeout < 0:
+        raise CliError(
+            "usage", f"--timeout 必须是有限的非负数，收到 {timeout}。", EXIT_USAGE
+        )
 
     read_for = float(getattr(args, "read_for", 1))
-    if read_for < 0:
-        raise CliError("usage", f"--read-for 不能为负数，收到 {read_for}。", EXIT_USAGE)
+    if not math.isfinite(read_for) or read_for < 0:
+        raise CliError(
+            "usage", f"--read-for 必须是有限的非负数，收到 {read_for}。", EXIT_USAGE
+        )
     return repeat, interval_ms, timeout, read_for
 
 
@@ -354,8 +361,9 @@ def _register_modem(subparsers) -> None:
 def run_modem(args) -> dict[str, Any]:
     """返回规范化为 ``cts``/``dsr``/``ring``/``rlsd`` 的四条线状态。"""
     config = build_config(args)
-    transport = serial_io.open_transport()
+    transport = None
     try:
+        transport = _new_transport(config)
         _open(transport, config)
         try:
             status = transport.modem_status()
@@ -368,7 +376,8 @@ def run_modem(args) -> dict[str, Any]:
                 EXIT_OPERATION,
             ) from exc
     finally:
-        _close(transport)
+        if transport is not None:
+            _close(transport)
     return _normalize_modem(status)
 
 
@@ -385,6 +394,20 @@ def _normalize_modem(status) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 # 公共辅助
 # ---------------------------------------------------------------------------
+
+
+def _new_transport(config):
+    """构造 transport；构造失败（如驱动缺失）同样收敛成 ``device_unavailable``。"""
+    try:
+        return serial_io.open_transport()
+    except CliError:
+        raise
+    except Exception as exc:
+        raise CliError(
+            "device_unavailable",
+            f"打开串口 {config.port} 失败：{exc}",
+            EXIT_OPERATION,
+        ) from exc
 
 
 def _open(transport, config) -> None:

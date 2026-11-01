@@ -13,7 +13,7 @@ from typing import Any
 __all__ = ["list_ports", "open_transport"]
 
 
-def list_ports() -> list:  # 元素类型是惰性导入的 app.io.serial_worker.PortInfo
+def list_ports() -> list[Any]:
     """枚举当前串口，返回 ``PortInfo`` 列表（未打开任何设备）。"""
     from app.io.serial_worker import list_ports as worker_list_ports
 

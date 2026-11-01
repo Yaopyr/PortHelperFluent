@@ -6,12 +6,24 @@ monkeypatch 成内存 transport，验证参数映射、读写顺序、退出码�
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 from app.cli.transports import serial_io
-from app.io.serial_worker import PortInfo
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _port_info(device, description, hwid, vid=None, pid=None, serial_number=None):
+    """惰性导入 ``PortInfo``：测试模块级导入不能把 PyQt6/pyserial 拉进进程。"""
+    from app.io.serial_worker import PortInfo
+
+    return PortInfo(device, description, hwid, vid, pid, serial_number)
 
 
 class FakeTransport:
-    """实现 ``SerialTransport`` 协议的内存替身，记录全部调用。"""
+    """实现 ``SerialTransport`` 协议的内存替身，按顺序记录全部调用。"""
 
     def __init__(
         self,
@@ -26,6 +38,7 @@ class FakeTransport:
         self.closed = False
         self.writes = []
         self.reads = []
+        self.calls = []
         self.config = None
         self.dtr = None
         self.rts = None
@@ -40,36 +53,54 @@ class FakeTransport:
         self._read_error = read_error
 
     def open(self, config):
+        self.calls.append(("open", config))
         if self._open_error is not None:
             raise self._open_error
         self.config = config
 
     def close(self):
+        self.calls.append(("close",))
         self.closed = True
 
     def read(self, size, timeout):
+        self.calls.append(("read", size, timeout))
         self.reads.append(timeout)
         if self._read_error is not None:
             raise self._read_error
         return self.chunks.pop(0) if self.chunks else b""
 
     def write(self, data):
+        self.calls.append(("write", bytes(data)))
         if self._write_error is not None:
             raise self._write_error
         self.writes.append(bytes(data))
         return len(data)
 
     def set_dtr(self, value):
+        self.calls.append(("dtr", value))
         self.dtr = value
 
     def set_rts(self, value):
+        self.calls.append(("rts", value))
         self.rts = value
 
     def send_break(self, duration=0.25):
+        self.calls.append(("break",))
         self.broke = True
 
     def modem_status(self):
+        self.calls.append(("modem",))
         return dict(self._modem)
+
+
+def _prevent_hanging_read(monkeypatch) -> None:
+    """把 read_until 换成即时返回的桩，避免非法时间参数让红灯测试真的挂起。"""
+    from app.cli.reads import ReadOutcome
+
+    monkeypatch.setattr(
+        "app.cli.commands.serial.read_until",
+        lambda fetch, **kwargs: ReadOutcome(b"", False, False, 0, 0.0),
+    )
 
 
 def _install(monkeypatch, transport: FakeTransport) -> FakeTransport:
@@ -90,8 +121,8 @@ def test_list_reports_ports(cli, monkeypatch) -> None:
     _install_ports(
         monkeypatch,
         [
-            PortInfo("COM9", "USB Serial", "USB VID:PID=1234:5678", 0x1234, 0x5678, "SN1"),
-            PortInfo("COM3", "Bluetooth Link", "BTHENUM", None, None, None),
+            _port_info("COM9", "USB Serial", "USB VID:PID=1234:5678", 0x1234, 0x5678, "SN1"),
+            _port_info("COM3", "Bluetooth Link", "BTHENUM"),
         ],
     )
     payload = cli(["serial", "list"])
@@ -117,8 +148,8 @@ def test_list_filter_matches_device_description_and_hwid(cli, monkeypatch) -> No
     _install_ports(
         monkeypatch,
         [
-            PortInfo("COM9", "USB Serial", "USB VID:PID=1234:5678", None, None, None),
-            PortInfo("COM3", "Bluetooth Link", "BTHENUM", None, None, None),
+            _port_info("COM9", "USB Serial", "USB VID:PID=1234:5678"),
+            _port_info("COM3", "Bluetooth Link", "BTHENUM"),
         ],
     )
     payload = cli(["serial", "list", "--filter", "usb"])
@@ -297,6 +328,54 @@ def test_dtr_rts_break_line_ending_and_file_input(cli, monkeypatch, tmp_path) ->
     assert from_file.closed is True
 
 
+def test_send_call_order(cli, monkeypatch) -> None:
+    transport = _install(monkeypatch, FakeTransport([b"O", b"K"]))
+    payload = cli(
+        [
+            "serial",
+            "send",
+            "--port",
+            "COM9",
+            "--text",
+            "AT",
+            "--dtr",
+            "on",
+            "--rts",
+            "off",
+            "--send-break",
+            "--repeat",
+            "2",
+            "--interval-ms",
+            "0",
+            "--expect",
+            "OK",
+        ]
+    )
+    assert payload["exit_code"] == 0
+    assert [call[0] for call in transport.calls] == [
+        "open",
+        "dtr",
+        "rts",
+        "break",
+        "write",
+        "write",
+        "read",
+        "read",
+        "modem",
+        "close",
+    ]
+    assert transport.calls[0] == ("open", transport.config)
+    assert transport.calls[1] == ("dtr", True)
+    assert transport.calls[2] == ("rts", False)
+    assert transport.calls[3] == ("break",)
+    assert transport.calls[4] == ("write", b"AT")
+    assert transport.calls[5] == ("write", b"AT")
+    assert transport.calls[6][0] == "read"
+    assert transport.calls[7][0] == "read"
+    assert transport.calls[8] == ("modem",)
+    assert transport.calls[9] == ("close",)
+
+
 def test_line_ending_applied_once_before_repeat(cli, monkeypatch) -> None:
     transport = _install(monkeypatch, FakeTransport())
     payload = cli(
@@ -352,6 +431,35 @@ def test_negative_interval_is_rejected(cli, monkeypatch) -> None:
     assert payload["error"]["code"] == "usage"
 
 
+def test_non_finite_timeout_is_rejected(cli, monkeypatch) -> None:
+    _prevent_hanging_read(monkeypatch)
+    _install(monkeypatch, FakeTransport())
+    for value in ("nan", "inf"):
+        payload = cli(
+            ["serial", "send", "--port", "COM9", "--text", "AT", "--timeout", value]
+        )
+        assert payload["exit_code"] == 2
+        assert payload["error"]["code"] == "usage"
+
+
+def test_non_finite_read_for_is_rejected(cli, monkeypatch) -> None:
+    _prevent_hanging_read(monkeypatch)
+    _install(monkeypatch, FakeTransport())
+    payload = cli(["serial", "send", "--port", "COM9", "--text", "AT", "--read-for", "nan"])
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
+
+
+def test_timeout_zero_still_allowed(cli, monkeypatch) -> None:
+    transport = _install(monkeypatch, FakeTransport())
+    payload = cli(
+        ["serial", "send", "--port", "COM9", "--text", "AT", "--expect", "OK", "--timeout", "0"]
+    )
+    assert payload["exit_code"] == 4
+    assert payload["error"]["code"] == "expect_mismatch"
+    assert transport.closed is True
+
+
 def test_open_failure_maps_to_device_unavailable(cli, monkeypatch) -> None:
     transport = _install(monkeypatch, FakeTransport(open_error=OSError("拒绝访问")))
     payload = cli(["serial", "send", "--port", "COM9", "--text", "AT", "--read-for", "0"])
@@ -397,9 +505,46 @@ def test_modem_reports_normalized_lines(cli, monkeypatch) -> None:
     assert transport.closed is True
 
 
+def test_open_transport_construction_failure_maps_to_device_unavailable(
+    cli, monkeypatch
+) -> None:
+    def _broken_factory():
+        raise OSError("驱动不可用")
+
+    monkeypatch.setattr(serial_io, "open_transport", _broken_factory)
+    payload = cli(["serial", "send", "--port", "COM9", "--text", "AT", "--read-for", "0"])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "device_unavailable"
+
+
 def test_modem_open_failure_maps_to_device_unavailable(cli, monkeypatch) -> None:
     transport = _install(monkeypatch, FakeTransport(open_error=OSError("占用")))
     payload = cli(["serial", "modem", "--port", "COM9"])
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "device_unavailable"
     assert transport.closed is True
+
+
+# ---------------------------------------------------------------------------
+# 架构回归：CLI 导入不拉进 GUI/pyserial
+# ---------------------------------------------------------------------------
+
+
+def test_cli_imports_do_not_load_gui_or_pyserial() -> None:
+    modules = ("app.io.serial_worker", "serial", "PyQt6")
+    for module in ("app.cli.main", "app.cli.commands.serial"):
+        code = (
+            f"import sys; import {module}; "
+            f"bad = [m for m in {modules!r} if m in sys.modules]; "
+            "print(bad); raise SystemExit(1 if bad else 0)"
+        )
+        process = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert process.returncode == 0, process.stdout + process.stderr
+        assert process.stdout.strip() == "[]"
+
