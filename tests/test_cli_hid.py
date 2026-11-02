@@ -103,6 +103,7 @@ class FakeBackend:
         write_error=None,
         write_result: int | None = None,
         read_error=None,
+        read_error_after: int | None = None,
         close_error=None,
     ) -> None:
         self.devices = list(devices)
@@ -115,6 +116,8 @@ class FakeBackend:
         self._write_error = write_error
         self._write_result = write_result
         self._read_error = read_error
+        self._read_error_after = read_error_after
+        self._read_count = 0
         self._close_error = close_error
 
     def enumerate(self):
@@ -142,7 +145,10 @@ class FakeBackend:
         self.calls.append(("read", size, timeout_ms))
         if self._clock is not None:
             self._clock.tick()
-        if self._read_error is not None:
+        self._read_count += 1
+        if self._read_error is not None and (
+            self._read_error_after is None or self._read_count > self._read_error_after
+        ):
             raise self._read_error
         return self.chunks.pop(0) if self.chunks else b""
 
@@ -856,7 +862,7 @@ def test_monitor_rejects_invalid_report_length(cli, monkeypatch, extra) -> None:
     assert backend.calls == []
 
 
-def test_monitor_read_error_exits_3_without_events(cli, monkeypatch) -> None:
+def test_monitor_read_error_emits_error_event_before_envelope(cli, monkeypatch) -> None:
     clock = FakeClock()
     backend = _install(
         monkeypatch,
@@ -869,8 +875,49 @@ def test_monitor_read_error_exits_3_without_events(cli, monkeypatch) -> None:
     assert payload["command"] == "hid.monitor"
     assert payload["error"]["code"] == "device_unavailable"
     assert "1234:5678" in payload["error"]["message"]
-    # 监控只输出 data 事件，读写失败直接走错误信封。
-    assert "raw" not in payload
+
+    events = _events(payload)
+    assert len(events) == 2
+    error_event, envelope = events
+    assert error_event["event"] == "error"
+    assert error_event["code"] == "device_unavailable"
+    assert "1234:5678" in error_event["message"]
+    assert isinstance(error_event["at"], str)
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "device_unavailable"
+
+    assert backend.handle.closed is True
+    assert backend.calls[-1] == ("close",)
+
+
+def test_monitor_read_error_after_data_keeps_prior_event(cli, monkeypatch) -> None:
+    clock = FakeClock()
+    backend = _install(
+        monkeypatch,
+        FakeBackend(
+            [_device(b"p1")],
+            chunks=[b"\x01"],
+            clock=clock,
+            read_error=OSError("读失败"),
+            read_error_after=1,
+        ),
+    )
+    _install_clock(monkeypatch, clock)
+
+    payload = cli(["hid", "monitor", "--index", "0", "--duration", "1"])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "device_unavailable"
+    assert "1234:5678" in payload["error"]["message"]
+
+    events = _events(payload)
+    assert [event.get("event") for event in events] == ["data", "error", None]
+    assert events[0]["hex"] == "01"
+    assert events[1]["event"] == "error"
+    assert events[1]["code"] == "device_unavailable"
+    assert "1234:5678" in events[1]["message"]
+    assert events[-1]["ok"] is False
+    assert events[-1]["command"] == "hid.monitor"
+
     assert backend.handle.closed is True
     assert backend.calls[-1] == ("close",)
 

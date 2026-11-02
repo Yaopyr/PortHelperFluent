@@ -346,9 +346,19 @@ def run_monitor(args) -> dict[str, Any]:
             except CliError:
                 raise
             except Exception as exc:
+                message = f"读取 HID 设备 {_ident(info)} 失败：{exc}"
+                # 流式命令运行中失败：先输出一行 error 事件，再由入口输出标准错误信封。
+                emit_event(
+                    {
+                        "event": "error",
+                        "code": "device_unavailable",
+                        "message": message,
+                        "at": hid_io._timestamp(),
+                    }
+                )
                 raise CliError(
                     "device_unavailable",
-                    f"读取 HID 设备 {_ident(info)} 失败：{exc}",
+                    message,
                     EXIT_OPERATION,
                 ) from exc
             chunk = bytes(chunk) if chunk else b""
