@@ -48,7 +48,7 @@ PortHelperFluent.exe <group> <action> --help
 | 1 | `internal` | 未预期异常（只输出一行摘要，不打 traceback） |
 | 2 | `usage` | 参数缺失/非法（含 argparse 错误） |
 | 3 | `not_found` / `invalid_input` / `device_unavailable` / `ambiguous_device` / `connection_failed` / `permission_denied` / `unsupported` / `update_failed` | 输入、环境或操作失败 |
-| 4 | `expect_mismatch` / `timeout` | 等待回包超时或 `--expect` 未命中 |
+| 4 | `expect_mismatch` / `timeout` | 等待失败：`serial`/`spp` 的 `--expect` 未命中为 `expect_mismatch`，`net` 等待回包超时为 `timeout` |
 | 130 | `interrupted` | 用户中断（Ctrl+C） |
 
 ## 输入契约
@@ -246,7 +246,7 @@ python main.py net tcp --host 127.0.0.1 --port 18765 --text PING --expect PONG -
 python main.py c51 export --config-json '{"crystal_mhz":12.0}' --out-dir .\keil-project
 ```
 
-解析结果请以 JSON 的 `ok`、`data` 与退出码为准。例如 `--expect` 未命中时退出码为 4，`ok` 为 `false`，`error.code` 为 `expect_mismatch`。
+解析结果请以 JSON 的 `ok`、`data` 与退出码为准。例如 `--expect` 未命中时退出码为 4，`ok` 为 `false`；`error.code` 在 `serial`/`spp` 下为 `expect_mismatch`，在 `net` 下为 `timeout`。
 
 ## 限制与注意
 

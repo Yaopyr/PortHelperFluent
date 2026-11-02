@@ -177,6 +177,15 @@ def run_udp(args) -> dict[str, Any]:
     if bool(getattr(args, "listen_only", False)):
         return _run_listen_only(args)
 
+    for attribute in ("duration", "max_bytes", "max_events", "until", "until_hex"):
+        if getattr(args, attribute, None) is not None:
+            raise CliError(
+                "usage",
+                "--duration/--max-bytes/--max-events/--until/--until-hex "
+                "仅用于 --listen-only。",
+                EXIT_USAGE,
+            )
+
     data = read_input(args)
     host = str(getattr(args, "host", "") or "").strip()
     if not host:

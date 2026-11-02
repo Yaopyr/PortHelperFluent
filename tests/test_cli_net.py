@@ -355,6 +355,37 @@ def test_udp_echo_with_expect(cli) -> None:
     assert "from" not in data
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--duration", "1"],
+        ["--max-bytes", "1"],
+        ["--max-events", "1"],
+        ["--until-hex", "00"],
+    ],
+)
+def test_udp_send_rejects_stream_options(cli, extra) -> None:
+    """发送模式不接受流式参数，显式报参数错误而不是静默忽略。"""
+    with _udp_echo_server() as port:
+        payload = cli(
+            [
+                "net",
+                "udp",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--text",
+                "hi",
+                *extra,
+            ]
+        )
+
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
+    assert "--listen-only" in payload["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # UDP 只收模式
 # ---------------------------------------------------------------------------
