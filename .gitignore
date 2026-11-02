@@ -13,3 +13,8 @@ analysis/strings/ascii.txt
 analysis/strings/utf16.txt
 analysis/strings/chinese.txt
 analysis/rea/
+
+# 软件模拟验证生成物（tools/run_simulation.py）：
+# report.md / report.json / results.jsonl / screenshots/ / artifacts/ /
+# baseline.json / baseline.log / pytest.log / latest.txt 全部留在本地，不入库。
+validation-reports/
