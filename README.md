@@ -6,7 +6,7 @@
   ![Platform](https://img.shields.io/badge/platform-Windows%2011-0A84FF)
   ![Python](https://img.shields.io/badge/python-3.13-3776AB)
   ![PyQt6](https://img.shields.io/badge/PyQt6-6.11-41CD52)
-  ![Tests](https://img.shields.io/badge/tests-755%20passed-0F7B0F)
+  ![Tests](https://img.shields.io/badge/tests-1226-0F7B0F)
   ![License](https://img.shields.io/badge/license-MIT-blue)
 </div>
 
@@ -42,6 +42,7 @@
 | 点阵生成 | 文字/BMP 取模、系统字体、粗体/斜体、扫描/走向/位序、分页、单元格编辑、C/BIN 导出、BMP 文件夹批量 |
 | C51 向导 | 晶振/6T/12T、P0–P3、外部中断/定时器/串口中断、定时器 0–2、波特率、SMOD、功耗模式、软件延时、警告、C 与 Keil 工程导出 |
 | 设置与关于 | 主题/强调色、默认编码、日志显示、路径、配置导出/重置、在线更新、支持范围与致谢 |
+| AI Agent CLI | 同一个 exe 双击进 GUI、带子命令进 CLI；默认 JSON、固定退出码、UTF-8、stdin、有界流式；覆盖校验/转换/取模/C51/串口/网络/HID/蓝牙/配置/更新 |
 
 ## 界面与交互
 
@@ -85,6 +86,18 @@ dist\PortHelperFluent.exe
 PortHelperFluent.exe --selftest --report selftest.json
 PortHelperFluent.exe --smoke-test
 ```
+
+同一个 exe 也提供命令行（默认 JSON，供 AI Agent 与脚本调用）：
+
+```powershell
+PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC" | Out-String
+PortHelperFluent.exe serial list | Out-String
+PortHelperFluent.exe net tcp --host 127.0.0.1 --port 18765 --text PING --expect PONG --timeout 3 | Out-String
+```
+
+exe 是 GUI 子系统（双击只开 GUI、不创建控制台）。在交互式 PowerShell 里直接调用不会等待进程结束，需要输出/退出码时请加 `| Out-String`（或 `Start-Process -Wait -PassThru`）；Agent 的 `subprocess.run(capture_output=True)` 会自动等待。
+
+完整命令表、退出码与 Agent 示例见 [命令行文档](docs/CLI.md)。
 
 ### 从源码运行
 
@@ -130,13 +143,14 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 porthelper-fluent/
 ├─ app/
 │  ├─ core/        # 纯 Python 算法：校验、编码、图像、字模、C51、配置、日志
+│  ├─ cli/         # 命令行：命令注册、JSON/NDJSON 输出、无头传输
 │  ├─ io/          # 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端、蓝牙后台任务（async_worker · ble_worker · spp_worker）
 │  ├─ services/    # 路径、导出、会话记录、Ping/DNS/网卡、蓝牙纯函数、在线更新（updates · updater_install）
 │  └─ ui/          # Fluent 窗口、页面（含蓝牙调试）、通用控件、对话框、主题、统一布局容器
 ├─ analysis/       # 逆向文字证据与解析脚本（原始二进制/图片资源不提交）
 ├─ build/          # PyInstaller spec、构建脚本、图标、版本信息
 ├─ docs/           # 架构、构建、使用、逆向说明、设计规格与实施计划
-├─ tests/          # pytest 测试（755 项）
+├─ tests/          # pytest 测试（1226 项）
 ├─ main.py         # 应用入口与自检
 ├─ requirements.txt
 └─ pytest.ini
@@ -178,10 +192,20 @@ python -m pytest
 
 当前仓库状态：
 
-- **755 项测试通过**（pytest，离屏 Qt，无真实串口/HID/蓝牙依赖）。
+- **1226 项测试**（pytest，离屏 Qt，无真实串口/HID/蓝牙依赖；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1203 项）。
 - 覆盖校验已知向量、CRC 独立参考、8051 定时/波特率寄存器、RGB565/RGB332、扫描方向/字节序、字模位序/分页、配置损坏恢复、便携目录回退、TCP/UDP 回环、串口/HID 假传输、蓝牙 UUID/MTU 分片假设备、打包 selftest/smoke。
 - 打包后的 exe 在隔离 `APPDATA`、空 `PYTHONUSERBASE`/`PYTHONPATH` 的临时目录中通过 `--selftest` 与 `--smoke-test`。
 - 真实串口/HID/蓝牙设备读写、Keil 打开生成的工程属于手工验收项。
+
+### 软件模拟验证
+
+可重复的端到端模拟套件位于 `tests/simulation/`：用有状态虚拟设备替代串口/HID/BLE/SPP，本机回环替代外部网络，在离屏 Qt 中启动真实 `MainWindow` 与真实 worker，覆盖 69 个自动化场景并生成中文报告。
+
+```powershell
+python tools\run_simulation.py --strict --screenshots always --with-baseline
+```
+
+报告生成在 `validation-reports/sim-<时间戳>/report.md`；人工验收项见 [软件模拟验证说明](docs/validation/README.md) 与 [人工验收清单](docs/validation/manual-acceptance.md)。
 
 ## 逆向工程说明
 
@@ -236,6 +260,7 @@ HID 页面仅支持标准 HID；串口“会话记录”是本程序自己的收
 - [架构设计](docs/ARCHITECTURE.md)
 - [构建与打包](docs/BUILDING.md)
 - [使用指南](docs/USAGE.md)
+- [命令行（AI Agent）](docs/CLI.md)
 - [逆向工程说明](docs/REVERSE_ENGINEERING.md)
 - [设计规格](docs/superpowers/specs/2026-10-26-porthelper-fluent-design.md)
 - [实施计划](docs/superpowers/plans/2026-10-26-porthelper-fluent.md)

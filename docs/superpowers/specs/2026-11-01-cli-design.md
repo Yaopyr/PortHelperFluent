@@ -284,10 +284,10 @@ checksum (--text|--hex|--file|--stdin) [--encoding utf-8]
 ### convert
 
 ```text
-convert base --value TEXT --from-base INT [--bits 32|64] [--signed]
+convert base --value TEXT --from-base INT [--bits 1..64] [--signed]
 convert binhex --mode bin-to-hex|hex-to-text|hex-to-bytes (输入) [--encoding utf-8] [--out PATH]
-convert sevenseg (--char C | --segments a,b,c,d,e,f,g,dp) [--common-anode]
-convert palette (--color #RRGGBB | --rgb R,G,B | --decode VALUE --format rgb565|rgb332|rgb888)
+convert sevenseg (--char C | --segments a,b,c,d,e,f,g,dp)
+convert palette (--color #RRGGBB | --rgb R,G,B | --decode VALUE --decode-format rgb565|rgb332|rgb888)
 convert gif --file GIF --out-dir DIR [--width N] [--height N] [--stem NAME]
 convert audio --file WAV|MP3 --out-dir DIR [--name NAME] [--max-samples N]
 convert qr --text CONTENT --out PATH [--ec L|M|Q|H] [--box-size 8] [--border 4]
@@ -300,7 +300,7 @@ convert qr --text CONTENT --out PATH [--ec L|M|Q|H] [--box-size 8] [--border 4]
   - `hex-to-text`：输入按十六进制文本解析，按 `--encoding` 解码，返回 `text`；
   - `hex-to-bytes`：输入按十六进制文本解析，返回 `hex`/`size`；给 `--out` 时写原始字节文件。
 - `sevenseg --segments` 与 `--char` 互斥；输出 `code_hex`、`code_bin`、`segments`。
-- `palette` 正反向互斥；输出 `rgb`、`hex`、`rgb888`、`rgb565`、`rgb332`。
+- `palette` 正反向互斥；`--decode-format` 指定解码源编码，`--format json|text` 仍是输出格式；输出 `rgb`、`hex`、`rgb888`、`rgb565`、`rgb332`。
 - `gif` 复用 `load_gif` + `export_frames`，返回 `frames` 与 `files`。
 - `audio` 复用 `load_audio` + `audio_to_c` + `audio_to_h`，文件名默认取输入 stem，
   写出 `<name>.c` / `<name>.h`，返回 `sample_rate`、`channels`、`sample_width`、
@@ -325,8 +325,8 @@ image batch --folder DIR --out-dir DIR [--recursive] [params]
 ### dotmatrix
 
 ```text
-dotmatrix text --text TEXT --out-dir DIR [--format c|bin] [--name NAME] [font params] [--toggle P,R,C]...
-dotmatrix bmp --file IMAGE --out-dir DIR [--format c|bin] [--name NAME] [bmp params] [--toggle ...]
+dotmatrix text --text TEXT --out-dir DIR [--export-format c|bin] [--name NAME] [font params] [--toggle P,R,C]...
+dotmatrix bmp --file IMAGE --out-dir DIR [--export-format c|bin] [--name NAME] [bmp params] [--toggle ...]
 dotmatrix batch --folder DIR --out-dir DIR [--recursive] [bmp params]
 ```
 
@@ -337,8 +337,10 @@ Pillow 内置字体兜底。
 
 - 文字：`matrix_from_text` 得到分页；`--toggle` 以 `页,行,列`（0 基）在导出前翻转单元格。
 - BMP：`matrix_from_image` 单页；分页参数不适用。
-- 批量：对文件夹内每张图生成一个独立 C 文件，文件名取输入 stem。
-- 返回 `pages`、`width`、`height`、`bytes`、`files`。
+- 批量：对文件夹内每张图生成一个独立 C 文件，文件名取输入 stem；单张失败不中断其余文件，
+  失败原因进 `errors`。
+- `--export-format` 选择 C/BIN；`--format json|text` 只控制 CLI 输出。
+- 返回 `pages`、`width`、`height`、`bytes`、`files`；批量另返回 `errors`。
 
 ### c51
 
@@ -367,7 +369,7 @@ serial modem --port PORT [conn opts]
 ```
 
 `conn opts`：`--baud 115200`、`--data-bits 8`、`--stop-bits 1|1.5|2`、
-`--parity none|even|odd|mark|space`、`--flow none|rtscts|xonxoff|dsrdtr`、
+`--parity none|even|odd|mark|space`、`--flow none|rtscts|xonxoff`（与 GUI 的三种流控一致）、
 `--encoding utf-8`。
 
 - 复用 `list_ports`、`SerialConfig`、`PyserialTransport`；不启动 `SerialWorker`。
