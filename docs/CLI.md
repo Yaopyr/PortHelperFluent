@@ -258,4 +258,4 @@ python main.py c51 export --config-json '{"crystal_mhz":12.0}' --out-dir .\keil-
 - 输出默认紧凑 JSON；`--pretty` 只适用于非流式命令。二进制数据只写文件，`data` 中返回路径。
 - `net server` 有客户端上限（默认 16）与运行时长上限；流式命令都不会无限运行。
 - 不提供 MCP Server、常驻守护进程、会话复用、TUI 或交互式提示；每次调用都是独立进程。
-- exe 是 GUI 子系统（`console=False`）：双击只开 GUI，不创建控制台；CLI 依赖继承的标准流。交互式 PowerShell 直接调用不会等待进程结束，`$LASTEXITCODE` 可能是旧值——需要输出与退出码时用 `& PortHelperFluent.exe version | Out-String` 或 `Start-Process -Wait -PassThru`；Agent 的 `subprocess.run(capture_output=True)` 无需额外处理。两个标准流都缺失的极少数场景由 `ensure_console_streams()`（`AttachConsole`/`AllocConsole`）兜底。
+- exe 是 GUI 子系统（`console=False`）：双击只开 GUI，不创建控制台；CLI 依赖继承的标准流。交互式 PowerShell 直接调用不会等待进程结束，`$LASTEXITCODE` 可能是旧值——需要输出与退出码时用 `& PortHelperFluent.exe version | Out-String` 或 `Start-Process -Wait -PassThru`；Agent 的 `subprocess.run(capture_output=True)` 无需额外处理。标准流缺失的极少数场景由 `ensure_console_streams()`（`AttachConsole`/`AllocConsole`）兜底。

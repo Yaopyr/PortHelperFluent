@@ -133,7 +133,7 @@ dist\build.log
 - CLI 走继承的标准流：从 PowerShell/cmd 调用时 stdout/stderr 与退出码正常可用；Agent 用 `subprocess.run(..., capture_output=True)` 会被自动等待，能完整拿到 JSON 与退出码。
 - 交互式 PowerShell 直接调用 GUI 子系统的 exe 不会等待进程：调用运算符立即返回，`$LASTEXITCODE` 可能是旧值。需要等待结果/拿退出码时必须用管道或显式等待，例如 `& dist\PortHelperFluent.exe version | Out-String`、`Start-Process -Wait -PassThru`（构建脚本里的 `Invoke-CliJson` 就是用 `| Out-String` 强制等待）。
 - 为什么放弃 `hide_console="hide-early"`：Windows 11 的默认终端是 Windows Terminal（窗口类 `CASCADIA_HOSTING_WINDOW_CLASS`），窗口属于 Terminal 进程；PyInstaller 的 hide 只操作 bootloader 自建的控制台宿主窗口，无法隐藏/关闭 Terminal 窗口，双击或命令行调用仍会残留常驻终端。改用 GUI 子系统后双击根本不创建控制台，问题从根上消失。
-- 极少见的无标准流场景（例如从没有标准句柄的宿主直接拉起 CLI）：`app.cli.output.ensure_console_streams()` 在 `sys.stdout`/`sys.stderr` 缺失时才 `AttachConsole(-1)`，失败再 `AllocConsole()`，并用 `CONOUT$` 重建缺失的流；两个流都在时直接返回，绝不附着控制台（否则会把输出从管道挪到控制台，破坏 Agent 捕获）。所有 ctypes 异常静默。
+- 极少见的无标准流场景（例如从没有标准句柄的宿主直接拉起 CLI）：`app.cli.output.ensure_console_streams()` 在 `sys.stdout` 或 `sys.stderr` 缺失时才 `AttachConsole(-1)`，失败再 `AllocConsole()`，并用 `CONOUT$` 重建缺失的流；两个流都在时直接返回，绝不附着控制台（否则会把输出从管道挪到控制台，破坏 Agent 捕获）。所有 ctypes 异常静默。
 - 限制：onefile 每次 CLI 调用都要重新解压运行时，启动有固定开销；CLI 不提供常驻/会话复用。
 - 验收：双击无控制台/终端窗口、GUI 正常；PowerShell 直接调用有 JSON 输出；`| Out-String` 与 `Start-Process -Wait` 能等到退出码；Agent 管道捕获正常。
 
