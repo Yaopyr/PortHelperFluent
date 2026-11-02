@@ -266,8 +266,8 @@ try {
     # to what users get.  Each command must return the standard JSON envelope.
     $CliVersionPayload = Invoke-CliJson -Exe $DeliveryExe -Command 'version' -Label 'cli version'
     $CliVersionText = [string]$CliVersionPayload.data.version
-    if ($CliVersionText -ne '1.2.0') {
-        throw "cli version returned '$CliVersionText', expected '1.2.0' (command: version)"
+    if ($CliVersionText -ne '1.2.1') {
+        throw "cli version returned '$CliVersionText', expected '1.2.1' (command: version)"
     }
     $CliVersion = $CliVersionText
 

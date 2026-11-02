@@ -92,7 +92,7 @@ dist\PortHelperFluent.exe convert base --value 255 --from-base 10 --bits 8 | Out
 dist\PortHelperFluent.exe help
 ```
 
-期望：`version` 的 `data.version` 为 `1.2.0`；checksum 返回 `CBF43926`；`convert base` 的 16 进制输出为 `FF`；stdout 是 JSON 信封，退出码 0。参数错误（例如缺少子命令）应输出 `{"ok": false, ...}` 并以退出码 2 结束，stderr 有一行摘要。
+期望：`version` 的 `data.version` 为 `1.2.1`；checksum 返回 `CBF43926`；`convert base` 的 16 进制输出为 `FF`；stdout 是 JSON 信封，退出码 0。参数错误（例如缺少子命令）应输出 `{"ok": false, ...}` 并以退出码 2 结束，stderr 有一行摘要。
 
 exe 是 GUI 子系统（`console=False`），交互式 PowerShell 里直接调用**不会等待进程**，所以上面用 `| Out-String` 强制等待并收集输出；需要显式退出码时用 `& dist\PortHelperFluent.exe version | Out-String; $LASTEXITCODE` 或 `Start-Process -Wait -PassThru`。Agent 的 `subprocess.run(..., capture_output=True)` 天然等待，无需管道。
 
@@ -149,33 +149,33 @@ python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work 
 
 内置更新器只读 `https://api.github.com/repos/Yaopyr/PortHelperFluent/releases/latest`，并按固定资产名下载，因此发布顺序不能省略任何一步。
 
-1. **版本一致性**：`app/__init__.py` 的 `APP_VERSION` 与 `build/version_info.txt` 的 `filevers`/`prodvers`/`FileVersion`/`ProductVersion` 必须是同一个版本（本项目为 `1.2.0`）；`CHANGELOG.md` 与 `README.md` 的测试计数同步更新。`version_info.txt` 是手工维护的独立副本，不会从 `APP_VERSION` 自动生成。
+1. **版本一致性**：`app/__init__.py` 的 `APP_VERSION` 与 `build/version_info.txt` 的 `filevers`/`prodvers`/`FileVersion`/`ProductVersion` 必须是同一个版本（本项目为 `1.2.1`）；`CHANGELOG.md` 与 `README.md` 的测试计数同步更新。`version_info.txt` 是手工维护的独立副本，不会从 `APP_VERSION` 自动生成。
 2. **构建**：`powershell -ExecutionPolicy Bypass -File build/build.ps1`，确认全量测试通过、隔离目录 `--selftest`/`--smoke-test` 退出码为 0、`version`/`checksum`/`convert base` 三项 CLI 断言通过，然后确认 `dist/` 下只有一个 exe，并用下面命令确认 exe 里的版本资源：
 
    ```powershell
    (Get-Item dist\PortHelperFluent.exe).VersionInfo | Select-Object FileVersion, ProductVersion
    ```
 
-   期望两者均为 `1.2.0`（或 `1.2.0.0`）。`dist/SHA256.txt` 只是 exe 的校验和、`dist/build.log` 是构建日志，两者都不含应用版本行，不能用来核对版本。
+   期望两者均为 `1.2.1`（或 `1.2.1.0`）。`dist/SHA256.txt` 只是 exe 的校验和、`dist/build.log` 是构建日志，两者都不含应用版本行，不能用来核对版本。
 3. **打标签**：
    ```powershell
-   git tag -a v1.2.0 -m "PortHelper Fluent 1.2.0"
+   git tag -a v1.2.1 -m "PortHelper Fluent 1.2.1"
    ```
 4. **推送**：
    ```powershell
    git push origin main
-   git push origin v1.2.0
+   git push origin v1.2.1
    ```
-5. **创建 Release**（`notes.md` 内容取自 `CHANGELOG.md` 的 `[1.2.0]` 节）：
+5. **创建 Release**（`notes.md` 内容取自 `CHANGELOG.md` 的 `[1.2.1]` 节）：
    ```powershell
-   gh release create v1.2.0 dist/PortHelperFluent.exe dist/SHA256.txt `
-     --title "PortHelper Fluent 1.2.0" --notes-file notes.md
+   gh release create v1.2.1 dist/PortHelperFluent.exe dist/SHA256.txt `
+     --title "PortHelper Fluent 1.2.1" --notes-file notes.md
    ```
 6. **校验**：
    ```powershell
-   gh release view v1.2.0 --json tagName,isDraft,assets
+   gh release view v1.2.1 --json tagName,isDraft,assets
    ```
-   期望 `tagName` 为 `v1.2.0`、`isDraft` 为 `false`、资产正好两个。
+   期望 `tagName` 为 `v1.2.1`、`isDraft` 为 `false`、资产正好两个。
 
 **资产名必须严格为 `PortHelperFluent.exe` 与 `SHA256.txt`**：更新器按这两个名字匹配（exe 大小写不敏感，找不到同名 exe 才回退第一个 `.exe`；校验优先用 Release 元数据的 `sha256:` digest，否则下载 `SHA256.txt`）。改名、少传 `SHA256.txt` 或把资产打包成 zip 都会让在线更新失效。
 
@@ -185,7 +185,7 @@ python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work 
 python -c "from app.services.updates import fetch_latest_release, is_newer; r=fetch_latest_release(); print(r.version, r.exe.name, r.exe.size, r.exe.digest); print('newer:', is_newer(r.version))"
 ```
 
-回滚：`gh release delete v1.2.0 --yes`、`git push origin :refs/tags/v1.2.0`，再重新打标签发布。
+回滚：`gh release delete v1.2.1 --yes`、`git push origin :refs/tags/v1.2.1`，再重新打标签发布。
 
 ## 打包后自检
 
@@ -203,7 +203,7 @@ dist\PortHelperFluent.exe --smoke-test
   "python": "3.13.9",
   "qt": "6.11.0",
   "qfluentwidgets": "1.11.2",
-  "version": "1.2.0"
+  "version": "1.2.1"
 }
 ```
 

@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
+## [1.2.1] - 2026-11-03
+
+修复自动更新重启后残留的错误弹窗。
+
+### Fixed
+
+- 自动更新完成并重启后，新实例会弹出「Failed to load Python DLL ...\_MEI...\python313.dll」：更新实际已成功，但重启脚本继承了旧 onefile 进程的 PyInstaller 内部环境（`_MEIPASS2` 指向旧进程退出时删除的 `_MEI` 临时目录），新 exe 复用该目录导致加载失败。更新脚本现在在重启前设置 `PYINSTALLER_RESET_ENVIRONMENT=1`，让 bootloader 重置内部环境并重新解包；替换失败后重启旧版同样生效。
+
 ## [1.2.0] - 2026-11-01
 
 新增面向 AI Agent 与脚本的命令行接口，并让同一个 exe 同时承担 GUI 与 CLI。

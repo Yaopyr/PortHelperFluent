@@ -78,7 +78,7 @@ def test_build_script_verifies_cli() -> None:
     assert "-Command 'version'" in text
     assert "checksum --text 123456789" in text
     assert "convert base --value 255 --from-base 10 --bits 8" in text
-    assert "$CliVersionText -ne '1.2.0'" in text
+    assert "$CliVersionText -ne '1.2.1'" in text
     assert "$CliChecksumResults.Count -lt 1" in text
     assert "$CliChecksumText -ne 'CBF43926'" in text
     assert "$CliBaseText -ne 'FF'" in text

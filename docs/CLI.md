@@ -24,13 +24,13 @@ PortHelperFluent.exe <group> <action> --help
 成功：
 
 ```json
-{"ok": true, "command": "checksum", "version": "1.2.0", "elapsed_ms": 12, "data": {"size": 9, "results": []}}
+{"ok": true, "command": "checksum", "version": "1.2.1", "elapsed_ms": 12, "data": {"size": 9, "results": []}}
 ```
 
 失败：
 
 ```json
-{"ok": false, "command": "serial.send", "version": "1.2.0", "elapsed_ms": 45,
+{"ok": false, "command": "serial.send", "version": "1.2.1", "elapsed_ms": 45,
  "error": {"code": "device_unavailable", "message": "打开串口 COM3 失败：..."}}
 ```
 

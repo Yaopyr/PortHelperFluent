@@ -49,6 +49,10 @@ def test_install_script_is_ascii_and_contains_required_steps(tmp_path: Path) -> 
     assert ".new" not in text
     assert "Move-Item" not in text
     assert f"Start-Process -FilePath '{target}'" in text
+    # 重启前必须重置 PyInstaller 内部环境：否则新 exe 会复用旧进程已被删除的 _MEI
+    # 目录，弹「Failed to load Python DLL」。Start-Process 继承脚本的环境变量。
+    assert "$env:PYINSTALLER_RESET_ENVIRONMENT = '1'" in text
+    assert text.index("$env:PYINSTALLER_RESET_ENVIRONMENT") < text.index("Start-Process -FilePath")
     # 失败分支：按 AppData 里的备份还原目标并重启旧版
     assert f"$backupExe = '{backup}'" in text
     assert "Test-Path -LiteralPath $backupExe" in text

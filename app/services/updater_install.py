@@ -15,6 +15,12 @@ onefile 打包的程序有 bootloader 父进程 + Python 子进程，`os.getpid(
 因此脚本在快速路径 `Wait-Process -Id` 之后，还会按**进程名**等待所有同名进程退出，
 再以「可独占打开目标 exe」轮询确认解锁（两者各最多 60 s）才开始替换。
 
+重启前必须设置 `PYINSTALLER_RESET_ENVIRONMENT=1`：脚本继承旧进程的 PyInstaller
+内部环境变量（`_MEIPASS2` 指向旧进程的 `_MEI` 临时目录），新 exe 的 bootloader
+会把它当成同一实例的子进程而复用该目录；旧进程退出时已删除该目录，新 exe 便会
+弹「Failed to load Python DLL ... python313.dll」。该变量让 bootloader 重置内部
+环境并重新解包（PyInstaller 6.10+ 官方推荐的重启方式）。
+
 脚本正文只用 ASCII 英文（PowerShell 5.1 在无 BOM 时会按 ANSI 解码），并以带 BOM
 的 UTF-8 落盘，保证路径里出现中文用户名时也不会乱码；路径一律单引号包裹并把
 `'` 双写成 `''`。备份、脚本与日志都写在 `work_dir`（即 `data_dir/updates`），
@@ -66,6 +72,12 @@ $targetExe = '@TARGET_EXE@'
 $processName = '@PROCESS_NAME@'
 $backupExe = '@BACKUP_EXE@'
 $logPath = '@LOG_PATH@'
+
+# This script inherits the old onefile process' PyInstaller environment (_MEIPASS2
+# points at the temp _MEI directory that the old process deletes on exit). Without
+# the reset flag, the restarted exe reuses that deleted directory and fails with
+# "Failed to load Python DLL". Start-Process inherits this variable.
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
 
 function Write-UpdateLog([string]$message) {
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'

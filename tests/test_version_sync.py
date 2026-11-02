@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_version_sources_are_in_sync() -> None:
-    assert APP_VERSION == "1.2.0"
+    assert APP_VERSION == "1.2.1"
     parts = (*APP_VERSION.split("."), "0")
     version_tuple = tuple(int(part) for part in parts)
     tuple_text = f"({', '.join(str(part) for part in version_tuple)})"
@@ -33,4 +33,4 @@ def test_building_doc_matches_current_version() -> None:
 
 def test_changelog_has_current_release_section() -> None:
     text = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert f"## [{APP_VERSION}] - 2026-11-01" in text
+    assert f"## [{APP_VERSION}] - 2026-11-03" in text
