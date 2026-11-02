@@ -69,7 +69,7 @@ python -m pytest
 - 串口/HID 假传输、蓝牙 BLE/SPP 假设备、页面离屏实例化、真实按钮点击；
 - CLI 命令注册、JSON 信封与退出码、输入解析、流式命令有界结束、假后端与本机 TCP/UDP 回环。
 
-当前基线：**1221 项测试**（含 CLI 离线/假后端/本机回环测试；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1198 项）。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
+当前基线：**1225 项测试**（含 CLI 离线/假后端/本机回环测试；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1202 项）。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
 
 单独跑某类测试：
 

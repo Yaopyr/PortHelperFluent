@@ -56,7 +56,7 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 - 测试必须保持隔离：`tests/conftest.py` 会把 `APPDATA` 指向临时目录。
 - 提交前运行全量 `python -m pytest`，不要只跑新增测试。
 
-当前基线：1221 项测试；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1198 项。硬件相关路径（真实串口/HID/蓝牙设备、Keil）属于手工验收。
+当前基线：1225 项测试；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1202 项。硬件相关路径（真实串口/HID/蓝牙设备、Keil）属于手工验收。
 
 ## 提交与 PR
 
