@@ -175,6 +175,17 @@ RFCOMM 与 COM 通道不能同时存在：切到 COM 通道会先断开 RFCOMM�
 - 下载包、备份、安装脚本与 `update.log` 都在 `%APPDATA%\PortHelperFluent\updates`，不会在 exe 所在目录（如桌面）留下文件（写权限探针创建后立即删除）；便携模式落在 `data\updates`。
 - 源码运行（`python main.py`）只下载不替换，按提示手动替换打包后的 exe。
 
+## 命令行（AI Agent）
+
+同一个 `PortHelperFluent.exe` 双击进入图形界面，带子命令参数时进入无界面 CLI（不创建 Qt 应用、不弹模态框），默认输出 JSON，适合 AI Agent、脚本与 CI 调用。源码入口为 `python main.py <group> <action>`。
+
+```powershell
+PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC"
+PortHelperFluent.exe serial send --port COM3 --text AT --line-ending crlf --expect OK --timeout 3
+```
+
+完整命令表、JSON 信封、退出码、输入/流式约定与 5 个可复制的 Agent 示例见 [命令行文档](CLI.md)。
+
 ## 故障排查
 
 | 现象 | 处理 |

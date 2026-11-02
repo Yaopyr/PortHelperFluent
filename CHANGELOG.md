@@ -2,6 +2,35 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的基本格式。
 
+## [1.2.0] - 2026-11-01
+
+新增面向 AI Agent 与脚本的命令行接口，并让同一个 exe 同时承担 GUI 与 CLI。
+
+### Added
+
+- 单 exe 双模式：双击仍是图形界面，带子命令参数时进入无界面 CLI；CLI 不创建 `QApplication`、不弹模态框、默认输出 JSON。
+- `system`：`version`、`selftest`（复用启动自检并输出同一份报告）。
+- `checksum`：文本/HEX/文件/stdin 输入、编码、取反、字节序、`--only`/`--crc` 过滤、自定义 CRC、算法源码预览。
+- `convert`：`base`、`binhex`、`sevenseg`、`palette`、`gif`、`audio`、`qr` 七个工具。
+- `image`：`convert` 单图与 `batch` 文件夹批量取模（C/BIN/LVGL8/LVGL9）。
+- `dotmatrix`：`text`、`bmp`、`batch`，含字体/扫描/位序/分页与 `--toggle` 单元格翻转。
+- `c51`：`show-config`、`calc`、`code`、`export`（导出 Keil 工程四个文件）。
+- `serial`：`list`、`send`（DTR/RTS/BREAK、行尾、重复发送、等待回包）、`monitor`（有界 NDJSON）、`modem`。
+- `net`：`tcp`、`udp`（含 `--listen-only` 有界接收）、`server`（echo/reply/greeting，NDJSON）、`ping`、`resolve`、`adapters`。
+- `hid`：`list`、`send`、`monitor`；`ble`：`scan`、`services`、`read`、`write`、`notify`；`spp`：`scan`、`send`、`com`。
+- `config`：`show`、`get`、`set`、`export`、`reset`（`reset` 必须 `--yes`）；`update`：`check`、`download`、`install`（仅冻结 exe 且 `--yes`）。
+- 稳定的 JSON 信封与退出码 0/1/2/3/4/130；`--format json|text`、`--pretty`、UTF-8 输出、stderr 一行摘要；`help`/`--help` 是唯一不输出 JSON 的路径。
+- 统一输入契约（`--text/--hex/--file/--stdin` 互斥）与流式契约（`--duration 1–3600`、`--max-bytes/--max-events`、`--until/--until-hex`、NDJSON 最后一行为信封）。
+- 新增 `docs/CLI.md`：完整命令表、JSON/退出码契约、流式约定、5 个可复制的 Agent 示例与限制说明。
+
+### Changed
+
+- 打包改为控制台子系统 + `hide_console="hide-early"`：双击时隐藏程序自建的控制台，PowerShell/cmd/Agent 调用时保留 stdout/stderr 与退出码，shell 正常等待进程结束。
+- `build/build.ps1` 新增交付副本的 `version`、`checksum`、`convert base` 三项 CLI 断言与 `dist/` 单 exe 检查，结果写入 `build.log`。
+- 版本号升至 1.2.0（`app/__init__.py` 与 `build/version_info.txt` 同步）。
+- 测试基线更新为 1220 项；`tests/test_version_sync.py` 锁定应用版本与 `build/version_info.txt`、发布文档、CHANGELOG 的同步关系。
+- 窗口标题、自检报告与既有测试改为从 `APP_VERSION` 读取版本，不再硬编码。
+
 ## [1.1.2] - 2026-10-30
 
 修复串口无法打开：界面报「打开串口失败：'SerialPage' object has no attribute 'open'」。

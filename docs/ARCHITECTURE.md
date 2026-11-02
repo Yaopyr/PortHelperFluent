@@ -5,10 +5,11 @@
 ## 设计目标
 
 1. **界面与协议解耦**：核心算法（校验、编码、图像、字模、C51）不导入 Qt，可在 pytest 中直接测试。
-2. **IO 与 UI 解耦**：串口/HID 的阻塞读写放在 `QThread`；网络使用 Qt 事件循环；页面只消费信号。
-3. **页面可替换**：主窗口只依赖 11 个页面的构造契约，页面内部可以独立演进。
-4. **单文件交付**：PyInstaller onefile，不安装服务/驱动，不写注册表，不需要管理员权限。
-5. **失败可读**：所有用户可见错误使用中文「发生了什么 + 可能原因 + 下一步」，技术细节写日志。
+2. **同一入口两种形态**：GUI 与 CLI 共用 `PortHelperFluent.exe`；CLI 不创建 `QApplication`、不弹模态框、默认输出 JSON。
+3. **IO 与 UI 解耦**：串口/HID 的阻塞读写放在 `QThread`；网络使用 Qt 事件循环；页面只消费信号。CLI 直接复用无 Qt 事件循环需求的后端类。
+4. **页面可替换**：主窗口只依赖 11 个页面的构造契约，页面内部可以独立演进。
+5. **单文件交付**：PyInstaller onefile，不安装服务/驱动，不写注册表，不需要管理员权限。
+6. **失败可读**：所有用户可见错误使用中文「发生了什么 + 可能原因 + 下一步」，技术细节写日志。
 
 非目标：系统级串口驱动监视、厂商 DLL（CH372）、蓝牙调试以外的蓝牙助手功能（音频、文件传输等）、增量/签名更新。
 
@@ -17,6 +18,7 @@
 ```mermaid
 flowchart TB
     UI["ui/<br/>FluentWindow · 页面 · 控件 · 对话框"]
+    CLI["cli/<br/>main · commands · transports · reads"]
     SVC["services/<br/>paths · settings · session_log · exports · net_tools<br/>bluetooth · updates · updater_install"]
     IO["io/<br/>serial_worker · hid_worker · net_client · net_server<br/>async_worker · ble_worker · spp_worker"]
     CORE["core/（Qt-free）<br/>encoding · checksum · color · imaging · fontmatrix · c51 · audio/gif/qr"]
@@ -26,6 +28,9 @@ flowchart TB
     UI --> SVC
     UI --> IO
     UI --> CORE
+    CLI --> SVC
+    CLI --> IO
+    CLI --> CORE
     SVC --> FS
     IO --> WIN
     CORE --> WIN
@@ -36,9 +41,32 @@ flowchart TB
 | `app/core` | 纯算法、数据格式、配置模型、日志基础设施 | 导入 Qt、页面、IO |
 | `app/services` | 路径、配置持久化、会话记录、导出、Ping/DNS/网卡 | 导入页面 |
 | `app/io` | 串口/HID 工作线程、TCP/UDP 客户端、TCP 服务端、蓝牙 BLE/SPP 后台任务 | 直接操作控件 |
+| `app/cli` | argparse 命令、JSON/NDJSON 输出、输入解析、无头传输封装 | 创建 `QApplication`、弹模态框、启动 Qt 事件循环 |
 | `app/ui` | 窗口、页面、控件、对话框、主题、反馈 | 在页面内实现协议/算法 |
 
 > 已知偏差：`app/core/imaging.py` 与 `app/core/fontmatrix.py` 引用了 `app/services/exports.py` 的文件名/原子写入辅助函数。它们是 Qt-free 的，但严格来说 `core → services` 不是理想方向；后续可将这些纯文件工具下沉到 `core/files.py`。
+
+## 单 exe 双模式（GUI / CLI）
+
+`main.py` 在导入任何 GUI 依赖、初始化日志或检查更新之前完成分流：
+
+```text
+argv[0] 命中 CLI 命令（checksum/convert/image/dotmatrix/c51/serial/net/hid/ble/spp/config/update/selftest/version/help）
+    或 argv[0] ∈ {-h, --help, -V, --version} → app.cli.main.run()（无 QApplication、无模态框）
+否则（无参数、--selftest、--report、--smoke-test）→ 原有 GUI 启动路径
+```
+
+- 离线命令（校验、转换、图片、点阵、C51、配置、版本）不导入 PyQt6；硬件命令按需导入 `app.io` 的后端类（`PyserialTransport`、`HidapiBackend`、`BleakBackend`、`WinRtSppBackend`），但只实例化类，不创建 worker、不启动 Qt 事件循环。
+- 算法与路径规则直接复用 `app/core`、`app/services`，CLI 不重写校验/取模/C51/配置逻辑；网络收发用标准库 `socket`，不复用 QtNetwork。
+- `app/cli/main.py` 统一负责 argparse、JSON/NDJSON 输出、异常收敛与退出码 0/1/2/3/4/130；`commands/*` 只做参数映射与结果组装，`transports/*` 提供无头 IO 并允许测试注入假实现。
+- 流式命令（`serial monitor`、`hid monitor`、`ble notify`、`net server`、`net udp --listen-only`）逐行输出 NDJSON，最后一行仍是标准信封；`--duration` 强制有界。
+
+打包为控制台子系统并设置 `hide_console="hide-early"`：
+
+- 双击时 Windows 为程序新建控制台，bootloader 判定「程序自己拥有」后立即隐藏，GUI 正常显示。
+- 从 PowerShell/cmd/Agent 启动时控制台属于父进程，不隐藏；stdout/stderr 与退出码可用，shell 会等待进程结束。
+- Agent 用管道捕获输出时 stdout 是管道，不受控制台隐藏影响。
+- 限制：onefile 每次 CLI 调用都要解压运行时，启动不是零成本；CLI 不提供常驻/会话复用，也不写 `logs/app.log`（`selftest` 例外）。
 
 ## 模块地图
 
@@ -57,6 +85,18 @@ flowchart TB
 | `audio_tools.py` | WAV/MP3 解码、时长、C 数组 |
 | `gif_tools.py` | GIF 帧读取、BMP 导出 |
 | `qr_tools.py` | 二维码生成/保存 |
+
+### cli
+
+| 模块 | 内容 |
+| --- | --- |
+| `main.py` | 根解析器、命令注册、`help`/版本开关归一、信封输出与退出码收敛 |
+| `errors.py` | `CliError`、稳定错误码与固定退出码 |
+| `output.py` | 成功/失败信封、NDJSON 事件、UTF-8 标准流 |
+| `inputs.py` | `--text/--hex/--file/--stdin` 互斥输入与编码解析 |
+| `reads.py` | 有界等待读取、匹配器、流式命令通用上界参数 |
+| `commands/` | 每个命令组一个模块：`checksum`、`convert`、`image`、`dotmatrix`、`c51`、`serial`、`net`、`hid`、`ble`、`spp`、`config`、`update`、`system` |
+| `transports/` | 无头 IO：`serial_io`、`hid_io`、`ble_io`、`spp_io`、`net_io` |
 
 ### io
 
@@ -221,7 +261,7 @@ IO 信号 → LogPane.append_bytes()
 
 ## 打包
 
-- `build/app.spec`：PyInstaller onefile、windowed、图标、版本信息、qfluentwidgets 资源、hidapi/qrcode/Pillow/numpy/psutil/pyserial。
+- `build/app.spec`：PyInstaller onefile、控制台子系统 + `hide_console="hide-early"`（双击隐藏新建控制台、终端调用保留 stdout/退出码）、图标、版本信息、qfluentwidgets 资源、hidapi/qrcode/Pillow/numpy/psutil/pyserial。
 - 蓝牙依赖用 `collect_submodules("bleak") + collect_submodules("winrt")` 显式收集：`winrt-*` 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩；`main.py` 的 `--selftest` 与 `build/build.ps1` 都会断言 `bleak`、`winrt.windows.devices.bluetooth.rfcomm`、`winrt.windows.networking.sockets` 三项可导入。
 - 排除 PyQt5、WebEngine、Quick/QML、3D、Multimedia、tkinter、matplotlib、scipy、pandas。
 - 不使用 UPX；不请求管理员权限。

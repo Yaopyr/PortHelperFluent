@@ -38,7 +38,17 @@ python main.py
 
 首次启动会在 `%APPDATA%\PortHelperFluent\` 创建配置和日志。便携模式：在 exe/入口所在目录放一个 `portable.flag`，配置和日志写入 `data\`。
 
-隐藏自检：
+同一个入口也提供命令行：带子命令参数时进入无界面 CLI，不创建 `QApplication`，默认输出 JSON：
+
+```bash
+python main.py version
+python main.py checksum --text 123456789 --only CRC-32/ISO-HDLC
+python main.py serial list
+```
+
+完整命令与 Agent 示例见 [CLI 文档](CLI.md)。
+
+隐藏自检（旧入口保持不变）：
 
 ```bash
 python main.py --selftest --report selftest.json
@@ -56,9 +66,10 @@ python -m pytest
 - 校验已知向量、CRC 独立参考、C51 寄存器、RGB565/RGB332、扫描/位序；
 - 配置损坏恢复、便携目录回退、日志上限、截断提示；
 - 本地 TCP/UDP 回环、TCP 服务端多客户端、UDP 域名队列；
-- 串口/HID 假传输、蓝牙 BLE/SPP 假设备、页面离屏实例化、真实按钮点击。
+- 串口/HID 假传输、蓝牙 BLE/SPP 假设备、页面离屏实例化、真实按钮点击；
+- CLI 命令注册、JSON 信封与退出码、输入解析、流式命令有界结束、假后端与本机 TCP/UDP 回环。
 
-当前基线：**755 passed**。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
+当前基线：**1220 passed**（含 CLI 离线/假后端/本机回环测试）。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
 
 单独跑某类测试：
 
@@ -66,8 +77,24 @@ python -m pytest
 python -m pytest tests/test_serial_worker.py -v
 python -m pytest tests/test_net_client.py tests/test_net_server.py -v
 python -m pytest tests/test_imaging.py tests/test_fontmatrix.py tests/test_c51.py -v
+python -m pytest tests/test_cli_core.py tests/test_cli_hardware.py tests/test_cli_entry.py -v
 python -m pytest tests/test_ui_layout.py tests/test_main_window.py -v
 ```
+
+## 命令行（CLI）验证
+
+CLI 与 GUI 是同一个 exe，构建后可直接在终端验证（不需要打开窗口）：
+
+```powershell
+dist\PortHelperFluent.exe version
+dist\PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC"
+dist\PortHelperFluent.exe convert base --value 255 --from-base 10 --bits 8
+dist\PortHelperFluent.exe help
+```
+
+期望：`version` 的 `data.version` 为 `1.2.0`；checksum 返回 `CBF43926`；`convert base` 的 16 进制输出为 `FF`；stdout 是 JSON 信封，退出码 0。参数错误（例如缺少子命令）应输出 `{"ok": false, ...}` 并以退出码 2 结束，stderr 有一行摘要。
+
+`build/build.ps1` 会在隔离临时目录里对交付副本执行同样的三项断言，并在 `dist/build.log` 的 `Packaged verification` 段记录 `cli version` / `cli checksum` / `cli convert base`；构建完成后还会检查 `dist/` 下**恰好一个 exe**。
 
 ## 构建单文件 exe
 
@@ -80,10 +107,11 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 1. 清理 `dist/` 与 `build_work/`；
 2. 运行全量 pytest（失败即中止）；
 3. 重新生成 `build/icon.ico`；
-4. 用 `build/app.spec` 构建 onefile 窗口程序；
-5. 校验归档中不含 `analysis/`、`docs/`、`tests/`、`.git`、PyQt5、WebEngine；
-6. 从隔离临时目录执行 `--selftest` 与 `--smoke-test`；
-7. 写出 `dist/SHA256.txt` 与 `dist/build.log`。
+4. 用 `build/app.spec` 构建 onefile 控制台程序；
+5. 检查 `dist/` 下恰好一个 exe；
+6. 校验归档中不含 `analysis/`、`docs/`、`tests/`、`.git`、PyQt5、WebEngine；
+7. 从隔离临时目录执行 `--selftest`、`--smoke-test`，并对交付副本执行 `version`、`checksum`、`convert base` 三项 CLI 断言；
+8. 写出 `dist/SHA256.txt` 与 `dist/build.log`。
 
 产物：
 
@@ -95,45 +123,55 @@ dist\build.log
 
 示例产物约 60 MB，具体大小/SHA 以构建日志为准。构建脚本不会提交二进制；`dist/` 已在 `.gitignore` 中。
 
+### 控制台子系统与双击行为
+
+`build/app.spec` 使用 `console=True` + `hide_console="hide-early"`，让同一个 exe 同时服务 GUI 与 CLI：
+
+- 双击：Windows 为程序新建控制台，bootloader 判定「程序自己拥有该控制台」后立即隐藏，只显示 GUI，不会留下黑窗口。
+- 从 PowerShell/cmd/Agent 启动：控制台属于父进程，不会被隐藏；stdout/stderr 与退出码可直接读取，shell 会等待进程结束。
+- Agent 用管道捕获输出：stdout 是管道，不受控制台隐藏影响。
+- 限制：onefile 每次 CLI 调用都要重新解压运行时，启动有固定开销；CLI 不提供常驻/会话复用；若从某些不支持控制台的环境（如无窗口服务）启动，输出仍应通过管道读取。
+- 验收必须覆盖三种场景：双击无残留控制台、PowerShell 调用有输出、资源管理器启动 GUI 正常。
+
 ### 手动打包（等价命令）
 
 ```powershell
 python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work build/app.spec
 ```
 
-`build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial、bleak 与 winrt，以及图标/版本信息。bleak 与 winrt 用 `collect_submodules` 收集全部子模块——WinRT 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩。不要额外关闭这些依赖，否则运行时会缺模块。
+`build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial、bleak 与 winrt，以及图标/版本信息。bleak 与 winrt 用 `collect_submodules` 收集全部子模块——WinRT 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩。不要额外关闭这些依赖，否则运行时会缺模块。不要在 spec 里恢复 `console=False`，否则 shell 不会等待窗口子系统进程，Agent 的 stdout/退出码不可靠。
 
 ## 发布 Release
 
 内置更新器只读 `https://api.github.com/repos/Yaopyr/PortHelperFluent/releases/latest`，并按固定资产名下载，因此发布顺序不能省略任何一步。
 
-1. **版本一致性**：`app/__init__.py` 的 `APP_VERSION` 与 `build/version_info.txt` 的 `filevers`/`prodvers`/`FileVersion`/`ProductVersion` 必须是同一个版本（本项目为 `1.1.2`）；`CHANGELOG.md` 与 `README.md` 的测试计数同步更新。`version_info.txt` 是手工维护的独立副本，不会从 `APP_VERSION` 自动生成。
-2. **构建**：`powershell -ExecutionPolicy Bypass -File build/build.ps1`，确认全量测试通过、隔离目录 `--selftest`/`--smoke-test` 退出码为 0，然后用下面命令确认 exe 里的版本资源：
+1. **版本一致性**：`app/__init__.py` 的 `APP_VERSION` 与 `build/version_info.txt` 的 `filevers`/`prodvers`/`FileVersion`/`ProductVersion` 必须是同一个版本（本项目为 `1.2.0`）；`CHANGELOG.md` 与 `README.md` 的测试计数同步更新。`version_info.txt` 是手工维护的独立副本，不会从 `APP_VERSION` 自动生成。
+2. **构建**：`powershell -ExecutionPolicy Bypass -File build/build.ps1`，确认全量测试通过、隔离目录 `--selftest`/`--smoke-test` 退出码为 0、`version`/`checksum`/`convert base` 三项 CLI 断言通过，然后确认 `dist/` 下只有一个 exe，并用下面命令确认 exe 里的版本资源：
 
    ```powershell
    (Get-Item dist\PortHelperFluent.exe).VersionInfo | Select-Object FileVersion, ProductVersion
    ```
 
-   期望两者均为 `1.1.2`（或 `1.1.2.0`）。`dist/SHA256.txt` 只是 exe 的校验和、`dist/build.log` 是构建日志，两者都不含应用版本行，不能用来核对版本。
+   期望两者均为 `1.2.0`（或 `1.2.0.0`）。`dist/SHA256.txt` 只是 exe 的校验和、`dist/build.log` 是构建日志，两者都不含应用版本行，不能用来核对版本。
 3. **打标签**：
    ```powershell
-   git tag -a v1.1.2 -m "PortHelper Fluent 1.1.2"
+   git tag -a v1.2.0 -m "PortHelper Fluent 1.2.0"
    ```
 4. **推送**：
    ```powershell
    git push origin main
-   git push origin v1.1.2
+   git push origin v1.2.0
    ```
-5. **创建 Release**（`notes.md` 内容取自 `CHANGELOG.md` 的 `[1.1.2]` 节）：
+5. **创建 Release**（`notes.md` 内容取自 `CHANGELOG.md` 的 `[1.2.0]` 节）：
    ```powershell
-   gh release create v1.1.2 dist/PortHelperFluent.exe dist/SHA256.txt `
-     --title "PortHelper Fluent 1.1.2" --notes-file notes.md
+   gh release create v1.2.0 dist/PortHelperFluent.exe dist/SHA256.txt `
+     --title "PortHelper Fluent 1.2.0" --notes-file notes.md
    ```
 6. **校验**：
    ```powershell
-   gh release view v1.1.2 --json tagName,isDraft,assets
+   gh release view v1.2.0 --json tagName,isDraft,assets
    ```
-   期望 `tagName` 为 `v1.1.2`、`isDraft` 为 `false`、资产正好两个。
+   期望 `tagName` 为 `v1.2.0`、`isDraft` 为 `false`、资产正好两个。
 
 **资产名必须严格为 `PortHelperFluent.exe` 与 `SHA256.txt`**：更新器按这两个名字匹配（exe 大小写不敏感，找不到同名 exe 才回退第一个 `.exe`；校验优先用 Release 元数据的 `sha256:` digest，否则下载 `SHA256.txt`）。改名、少传 `SHA256.txt` 或把资产打包成 zip 都会让在线更新失效。
 
@@ -143,7 +181,7 @@ python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work 
 python -c "from app.services.updates import fetch_latest_release, is_newer; r=fetch_latest_release(); print(r.version, r.exe.name, r.exe.size, r.exe.digest); print('newer:', is_newer(r.version))"
 ```
 
-回滚：`gh release delete v1.1.2 --yes`、`git push origin :refs/tags/v1.1.2`，再重新打标签发布。
+回滚：`gh release delete v1.2.0 --yes`、`git push origin :refs/tags/v1.2.0`，再重新打标签发布。
 
 ## 打包后自检
 
@@ -161,7 +199,7 @@ dist\PortHelperFluent.exe --smoke-test
   "python": "3.13.9",
   "qt": "6.11.0",
   "qfluentwidgets": "1.11.2",
-  "version": "1.1.2"
+  "version": "1.2.0"
 }
 ```
 
@@ -237,3 +275,4 @@ qfluentwidgets 的 acrylic 辅助代码引用了可选模块；本项目使用 M
 - [ ] C51：Keil 打开 `M51Project.Uv2`，编译 `Main.c`；核对定时/波特率。
 - [ ] 设置：浅色/深色、强调色、日志上限、配置导出/重置、便携模式。
 - [ ] exe：从无 Python 环境的目录启动，`--selftest`/`--smoke-test` 通过。
+- [ ] CLI：双击 exe 不出现残留控制台窗口；PowerShell 运行 `PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC"` 有 JSON 输出且退出码为 0；串口/HID/蓝牙命令用真实设备执行 `list`/`send` 一次。
