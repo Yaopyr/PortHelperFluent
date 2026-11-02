@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import Any, NoReturn
 
 from app.cli.commands import (
+    ble,
     c51,
     checksum,
     config,
@@ -72,6 +73,7 @@ def build_parser(
     c51.register(subparsers)
     net.register(subparsers)
     hid.register(subparsers)
+    ble.register(subparsers)
     serial.register(subparsers)
     update.register(subparsers)
     return parser
