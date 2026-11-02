@@ -34,6 +34,10 @@ __all__ = [
 # 蓝牙连接默认超时，与 GUI 的 ``CONNECT_TIMEOUT`` 一致。
 DEFAULT_TIMEOUT = 30.0
 
+# 通知队列里的断开哨兵；后端线程的断开回调据此经 ``call_soon_threadsafe`` 投递。
+_DISCONNECT_KIND = "disconnect"
+_PEER_DISCONNECT_MESSAGE = "设备主动断开连接"
+
 
 def new_backend() -> Any:
     """构造默认 bleak 后端；``app.io.ble_worker`` 只在真正用到时才导入。"""
@@ -185,12 +189,27 @@ async def notify(
     通知先进入 ``asyncio.Queue``，循环只在这里等待：有数据立即取走，没有数据时
     用 ``asyncio.wait_for(queue.get(), 剩余时间)`` 等到截止时间，不会忙等。结束条件
     是 ``duration`` 到点、累计 ``max_bytes``、累计 ``max_events`` 或 ``matcher`` 命中；
-    ``max_bytes`` 会截断最后一条通知的数据。``finally`` 取消订阅并断开连接。
+    ``max_bytes`` 会截断最后一条通知的数据。
+
+    连接前注册断开回调：后端线程报告断开时通过 ``loop.call_soon_threadsafe`` 往队列
+    塞入 ``("disconnect", 原因)`` 哨兵，循环收到后先 emit ``error`` 事件再抛
+    ``device_unavailable``/3。``finally`` 里先把回调替换成 no-op（避免残留回调继续写
+    队列），再退订与断开；连接/订阅阶段失败只抛错，不发 ``error`` 事件。
     """
-    queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
 
     def on_data(char: str, data: bytes) -> None:
         queue.put_nowait((str(char), bytes(data)))
+
+    def on_disconnect(reason: str) -> None:
+        try:
+            loop.call_soon_threadsafe(
+                queue.put_nowait, (_DISCONNECT_KIND, str(reason or _PEER_DISCONNECT_MESSAGE))
+            )
+        except RuntimeError:
+            # 循环已关闭（命令已结束）：残留回调不能再写队列。
+            pass
 
     subscribed = False
     total = 0
@@ -199,6 +218,7 @@ async def notify(
     buffer = bytearray()
     started = time.monotonic()
     try:
+        backend.set_disconnect_callback(on_disconnect)
         await _connect(backend, address, timeout)
         started = time.monotonic()
         deadline = started + float(duration)
@@ -209,9 +229,23 @@ async def notify(
             if remaining <= 0:
                 break
             try:
-                char, data = await asyncio.wait_for(queue.get(), remaining)
+                char, payload = await asyncio.wait_for(queue.get(), remaining)
             except TimeoutError:
                 break
+            if char == _DISCONNECT_KIND:
+                reason = str(payload) or _PEER_DISCONNECT_MESSAGE
+                emit(
+                    {
+                        "event": "error",
+                        "code": "device_unavailable",
+                        "message": reason,
+                        "at": _timestamp(),
+                    }
+                )
+                raise CliError(
+                    "device_unavailable", f"通知期间设备断开：{reason}", EXIT_OPERATION
+                )
+            data = bytes(payload)
             if max_bytes is not None:
                 budget = max_bytes - total
                 if budget <= 0:
@@ -243,6 +277,10 @@ async def notify(
     except Exception as exc:
         raise _unavailable("订阅", exc) from exc
     finally:
+        try:
+            backend.set_disconnect_callback(lambda _reason: None)
+        except Exception:
+            pass
         if subscribed:
             try:
                 await backend.set_notify(char_uuid, False, on_data)

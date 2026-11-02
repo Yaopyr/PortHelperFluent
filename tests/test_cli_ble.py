@@ -75,6 +75,7 @@ class FakeBleBackend:
         write_error=None,
         subscribe_error=None,
         unsubscribe_error=None,
+        disconnect_after_subscribe=False,
     ) -> None:
         self.devices = list(devices)
         self.services_list = list(services)
@@ -89,13 +90,16 @@ class FakeBleBackend:
         self._write_error = write_error
         self._subscribe_error = subscribe_error
         self._unsubscribe_error = unsubscribe_error
+        self._disconnect_after_subscribe = disconnect_after_subscribe
         self.calls: list[tuple] = []
+        self.callbacks: list = []
         self.disconnected = False
         self.connected = False
         self.disconnect_callback = None
 
     def set_disconnect_callback(self, callback):
         self.calls.append(("set_disconnect_callback",))
+        self.callbacks.append(callback)
         self.disconnect_callback = callback
 
     async def scan(self, duration, on_device, stop):
@@ -149,6 +153,11 @@ class FakeBleBackend:
             raise self._subscribe_error
         for char, data in self.notifications:
             on_data(char, data)
+        if self._disconnect_after_subscribe and self.disconnect_callback is not None:
+            # 模拟 bleak 的断开回调从别的线程进来：投递到事件循环后再入队。
+            asyncio.get_running_loop().call_soon_threadsafe(
+                self.disconnect_callback, "设备主动断开连接"
+            )
 
 
 def _install(monkeypatch, backend: FakeBleBackend) -> FakeBleBackend:
@@ -482,15 +491,45 @@ def test_notify_unsubscribes_and_disconnects() -> None:
 
 def test_notify_subscribe_failure_maps_without_unsubscribe() -> None:
     fake = FakeBleBackend(subscribe_error=OSError("特征值不支持通知"))
+    events: list[dict] = []
 
     with pytest.raises(CliError) as excinfo:
         asyncio.run(
-            ble_io.notify(fake, _ADDRESS, _CHAR, duration=0.1, emit=lambda event: None)
+            ble_io.notify(fake, _ADDRESS, _CHAR, duration=0.1, emit=events.append)
         )
     assert excinfo.value.code == "device_unavailable"
     assert excinfo.value.exit_code == 3
     assert _count(fake, "set_notify") == 1
     assert fake.disconnected is True
+    # 启动阶段失败只抛错，不发 error 事件。
+    assert events == []
+
+
+def test_notify_disconnect_emits_error_and_raises() -> None:
+    fake = FakeBleBackend(
+        notifications=[(_CHAR, b"\x01")], disconnect_after_subscribe=True
+    )
+    events: list[dict] = []
+
+    with pytest.raises(CliError) as excinfo:
+        asyncio.run(
+            ble_io.notify(fake, _ADDRESS, _CHAR, duration=0.1, emit=events.append)
+        )
+
+    assert excinfo.value.code == "device_unavailable"
+    assert excinfo.value.exit_code == 3
+    assert "通知期间设备断开" in excinfo.value.message
+    assert [event["event"] for event in events] == ["notification", "error"]
+    assert events[-1]["code"] == "device_unavailable"
+    assert events[-1]["message"] == "设备主动断开连接"
+    assert isinstance(events[-1]["at"], str)
+    # 回调在连接前注册，退出时替换为 no-op（第二次注册）。
+    assert fake.calls[0] == ("set_disconnect_callback",)
+    assert fake.calls[1] == ("connect", _ADDRESS)
+    assert len(fake.callbacks) == 2
+    assert ("set_notify", _CHAR, False) in fake.calls
+    assert fake.disconnected is True
+    fake.callbacks[-1]("late")  # no-op 不再写队列，也不会因循环关闭而抛错
 
 
 def test_notify_unsubscribe_failure_does_not_mask_result() -> None:
@@ -797,8 +836,10 @@ def test_notify_command_rejects_pretty(cli, monkeypatch) -> None:
     assert backend.calls == []
 
 
-def test_notify_command_rejects_until(cli, monkeypatch) -> None:
-    backend = _install(monkeypatch, FakeBleBackend())
+def test_notify_command_until_text_ends_early(cli, monkeypatch) -> None:
+    backend = _install(
+        monkeypatch, FakeBleBackend(notifications=[(_CHAR, b"\x01"), (_CHAR, b"OK")])
+    )
 
     payload = cli(
         [
@@ -814,9 +855,58 @@ def test_notify_command_rejects_until(cli, monkeypatch) -> None:
             "OK",
         ]
     )
+    assert payload["exit_code"] == 0
+    assert payload["data"]["matched"] is True
+    assert payload["data"]["events"] == 2
+    assert payload["data"]["bytes"] == 3
+    assert backend.disconnected is True
+
+
+def test_notify_rejects_until_and_until_hex_together(cli, monkeypatch) -> None:
+    backend = _install(monkeypatch, FakeBleBackend())
+
+    payload = cli(
+        [
+            "ble",
+            "notify",
+            "--address",
+            _ADDRESS,
+            "--char",
+            _CHAR,
+            "--duration",
+            "1",
+            "--until",
+            "OK",
+            "--until-hex",
+            "4F4B",
+        ]
+    )
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
     assert backend.calls == []
+
+
+def test_notify_command_disconnect_emits_error_and_exits_three(cli, monkeypatch) -> None:
+    backend = _install(
+        monkeypatch,
+        FakeBleBackend(
+            notifications=[(_CHAR, b"\x01")], disconnect_after_subscribe=True
+        ),
+    )
+
+    payload = cli(
+        ["ble", "notify", "--address", _ADDRESS, "--char", _CHAR, "--duration", "1"]
+    )
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "device_unavailable"
+    assert "通知期间设备断开" in payload["error"]["message"]
+
+    events = _events(payload)
+    assert [event.get("event") for event in events[:-1]] == ["notification", "error"]
+    assert events[-1]["ok"] is False
+    assert events[-1]["error"]["code"] == "device_unavailable"
+    assert ("set_notify", _CHAR, False) in backend.calls
+    assert backend.disconnected is True
 
 
 # ---------------------------------------------------------------------------
@@ -840,6 +930,15 @@ def test_scan_rejects_invalid_duration(cli, monkeypatch, argv) -> None:
 
     payload = cli(argv)
     assert payload["exit_code"] == 2
+    assert backend.calls == []
+
+
+def test_scan_rejects_blank_filter(cli, monkeypatch) -> None:
+    backend = _install(monkeypatch, FakeBleBackend())
+
+    payload = cli(["ble", "scan", "--duration", "0.1", "--filter", "   "])
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
     assert backend.calls == []
 
 

@@ -86,8 +86,11 @@ def _register_scan(subparsers) -> None:
 def run_scan(args) -> dict[str, Any]:
     """扫描并返回 ``devices`` 列表与 ``count``。"""
     duration = _duration(getattr(args, "duration", None), "--duration")
+    filter_text = getattr(args, "filter", None)
+    if filter_text is not None:
+        filter_text = _required_text(filter_text, "--filter")
     devices = asyncio.run(
-        ble_io.scan(ble_io.new_backend(), duration, getattr(args, "filter", None))
+        ble_io.scan(ble_io.new_backend(), duration, filter_text)
     )
     return {
         "devices": [ble_io.device_summary(info) for info in devices],
@@ -252,9 +255,10 @@ def _register_notify(subparsers) -> None:
         "notify",
         help="订阅 BLE 通知，按 NDJSON 输出 notification/end 事件（有界）。",
         description="连接并订阅后逐行输出 notification 事件，结束时输出 end 事件；"
-        "必须用 --duration 限定运行时长，可用 --max-bytes/--max-events/--until-hex "
-        "提前结束。输出固定为 NDJSON，--format text、--pretty 与 --until 都视为"
-        "参数错误（退出码 2）。",
+        "必须用 --duration 限定运行时长，可用 --max-bytes/--max-events/"
+        "--until/--until-hex 提前结束；设备在通知期间断开时先输出 error 事件再以"
+        "退出码 3 结束。输出固定为 NDJSON，--format text 与 --pretty 视为参数错误"
+        "（退出码 2）。",
     )
     _add_target_options(parser)
     add_stream_options(parser)
@@ -265,17 +269,13 @@ def _register_notify(subparsers) -> None:
 def run_notify(args) -> dict[str, Any]:
     """订阅通知并输出事件，返回 ``duration_s``/``bytes``/``events``/``matched``。"""
     _require_ndjson(args)
-    if getattr(args, "until", None) is not None:
-        raise CliError(
-            "usage",
-            "ble notify 不支持 --until，请改用 --until-hex。",
-            EXIT_USAGE,
-        )
     address = _required_text(getattr(args, "address", None), "--address")
     char = _required_text(getattr(args, "char", None), "--char")
     timeout = _timeout(getattr(args, "timeout", None))
     options = read_stream_options(args)
-    matcher = make_matcher(expect_hex=options.until_hex)
+    matcher = make_matcher(
+        expect=options.until, expect_hex=options.until_hex, encoding="utf-8"
+    )
     return asyncio.run(
         ble_io.notify(
             ble_io.new_backend(),
