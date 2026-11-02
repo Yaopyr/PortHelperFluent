@@ -62,6 +62,34 @@ function Invoke-PackagedExe {
     }
 }
 
+function Invoke-CliJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Exe,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    # The CLI exe uses the console subsystem, so calling it directly through the
+    # call operator keeps stdout and $LASTEXITCODE available (Start-Process
+    # cannot capture stdout).  The command is written as one string so the log
+    # and error text match exactly what ran; every verification argument below
+    # is a single whitespace-free token, hence the plain split.
+    $arguments = @($Command -split '\s+')
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $raw = (& $Exe @arguments 2>$null) -join "`n"
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    $detail = "$Label failed (command: $Command)"
+    if ($code -ne 0) { throw "$detail with exit code $code`: $raw" }
+    try { $payload = $raw | ConvertFrom-Json } catch { throw "${detail}: output was not JSON: $raw" }
+    if ($payload.ok -ne $true) { throw "${detail}: reported ok=false: $raw" }
+    return $payload
+}
+
 function Assert-SelftestReport {
     param(
         [Parameter(Mandatory = $true)][string]$ReportPath,
@@ -136,6 +164,13 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "PyInstaller did not produce $ExePath"
 }
 
+Write-Host '==> Checking that dist holds exactly one exe'
+$DistExeFiles = @(Get-ChildItem -LiteralPath $DistDir -Filter '*.exe' -File)
+if ($DistExeFiles.Count -ne 1) {
+    $FoundExes = if ($DistExeFiles.Count -eq 0) { '<none>' } else { $DistExeFiles.Name -join ', ' }
+    throw "Expected exactly one exe in ${DistDir}, found $($DistExeFiles.Count): $FoundExes"
+}
+
 Write-Host '==> Hashing artifact'
 $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ExePath).Hash.ToLowerInvariant()
 $SizeBytes = (Get-Item -LiteralPath $ExePath).Length
@@ -184,6 +219,9 @@ $DistSelftest = 'not run'
 $DistSmoke = 'not run'
 $TempSelftest = 'not run'
 $SmokeResult = 'not run'
+$CliVersion = 'not run'
+$CliChecksum = 'not run'
+$CliBase = 'not run'
 try {
     $Env:APPDATA = $IsolatedAppData
     if (-not [string]::IsNullOrWhiteSpace($UserBase)) { $Env:PYTHONUSERBASE = $UserBase }
@@ -208,6 +246,33 @@ try {
 
     Invoke-PackagedExe -Exe $DeliveryExe -Arguments @('--smoke-test') -Label 'temp-copy smoke test'
     $SmokeResult = 'exit 0'
+
+    # CLI checks run the delivered copy, so the exe under test is byte-identical
+    # to what users get.  Each command must return the standard JSON envelope.
+    $CliVersionPayload = Invoke-CliJson -Exe $DeliveryExe -Command 'version' -Label 'cli version'
+    $CliVersionText = [string]$CliVersionPayload.data.version
+    if ($CliVersionText -ne '1.2.0') {
+        throw "cli version returned '$CliVersionText', expected '1.2.0' (command: version)"
+    }
+    $CliVersion = $CliVersionText
+
+    $CliChecksumPayload = Invoke-CliJson -Exe $DeliveryExe -Command 'checksum --text 123456789 --only CRC-32/ISO-HDLC' -Label 'cli checksum'
+    $CliChecksumResults = @($CliChecksumPayload.data.results)
+    if ($CliChecksumResults.Count -lt 1) {
+        throw "cli checksum returned no results (command: checksum --text 123456789 --only CRC-32/ISO-HDLC)"
+    }
+    $CliChecksumText = [string]$CliChecksumResults[0].hex
+    if ($CliChecksumText -ne 'CBF43926') {
+        throw "cli checksum returned '$CliChecksumText', expected 'CBF43926' (command: checksum --text 123456789 --only CRC-32/ISO-HDLC)"
+    }
+    $CliChecksum = $CliChecksumText
+
+    $CliBasePayload = Invoke-CliJson -Exe $DeliveryExe -Command 'convert base --value 255 --from-base 10 --bits 8' -Label 'cli convert base'
+    $CliBaseText = [string]$CliBasePayload.data.outputs.'16'
+    if ($CliBaseText -ne 'FF') {
+        throw "cli convert base returned '$CliBaseText', expected 'FF' (command: convert base --value 255 --from-base 10 --bits 8)"
+    }
+    $CliBase = $CliBaseText
 }
 finally {
     $env:APPDATA = $OldAppData
@@ -276,6 +341,9 @@ $LogLines = @(
     "dist smoke:          $DistSmoke",
     "temp-copy selftest:  $TempSelftest",
     "temp-copy smoke:     $SmokeResult",
+    "cli version:         $CliVersion",
+    "cli checksum:        $CliChecksum",
+    "cli convert base:    $CliBase",
     "Archive check:       $ArchiveCheck",
     '',
     'Warnings:',

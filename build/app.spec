@@ -105,7 +105,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,
+    # Console subsystem so a shell waits for the process and stdout/exit codes
+    # work for the CLI; hide-early lets the bootloader hide the console window
+    # only when the program owns it (double-click), not when launched from an
+    # existing shell.
+    console=True,
+    hide_console="hide-early",
     icon=str(ICON_PATH),
     version=str(VERSION_PATH),
 )
