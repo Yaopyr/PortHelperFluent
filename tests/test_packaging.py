@@ -1,4 +1,4 @@
-"""打包约定的静态断言：控制台子系统、单 exe 与 CLI 验证。
+"""打包约定的静态断言：GUI 子系统、单 exe 与 CLI 验证。
 
 本文件只读取 ``build/app.spec`` 与 ``build/build.ps1`` 的文本，不调用 PyInstaller、
 也不运行构建脚本；真正的构建与 exe 验证由流水线（以及 Task 20 的构建）负责。
@@ -21,12 +21,12 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_spec_uses_console_with_hide_console() -> None:
-    """控制台子系统 + hide-early：双击时隐藏窗口，shell 调用时保留输出与退出码。"""
+def test_spec_uses_gui_subsystem_without_console() -> None:
+    """GUI 子系统：双击不创建控制台；hide-early 无法隐藏 Windows Terminal 窗口。"""
     text = _read(SPEC_PATH)
-    assert "console=True" in text
-    assert 'hide_console="hide-early"' in text
-    assert "console=False" not in text
+    assert "console=False" in text
+    assert "console=True" not in text
+    assert "hide_console" not in text
 
 
 def test_spec_builds_a_single_exe() -> None:
@@ -38,12 +38,17 @@ def test_spec_builds_a_single_exe() -> None:
 
 
 def test_build_script_invokes_cli_directly_and_keeps_exit_code() -> None:
-    """CLI 验证必须用调用运算符直连 exe（Start-Process 拿不到 stdout）。"""
+    """CLI 验证必须用调用运算符直连 exe（Start-Process 拿不到 stdout）。
+
+    GUI 子系统的 exe 不会让调用运算符自动等待，必须用 ``| Out-String`` 管道强制
+    等待进程结束并收集 stdout，否则读到的是空输出或未完成的退出码。
+    """
     text = _read(BUILD_SCRIPT_PATH)
     assert "function Invoke-CliJson" in text
     assert "& $Exe @arguments" in text
     assert "$LASTEXITCODE" in text
     assert "ConvertFrom-Json" in text
+    assert "2> $StdErrPath | Out-String" in text
 
 
 def test_build_script_captures_cli_stderr() -> None:

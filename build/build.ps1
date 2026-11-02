@@ -68,11 +68,12 @@ function Invoke-CliJson {
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $true)][string]$Label
     )
-    # The CLI exe uses the console subsystem, so calling it directly through the
-    # call operator keeps stdout and $LASTEXITCODE available (Start-Process
-    # cannot capture stdout).  The command is written as one string so the log
-    # and error text match exactly what ran; every verification argument below
-    # is a single whitespace-free token, hence the plain split.
+    # The CLI exe uses the GUI subsystem, so the call operator does not wait for
+    # the process on its own.  Piping stdout into Out-String forces PowerShell to
+    # wait for exit and keeps stdout available (Start-Process cannot capture
+    # stdout).  The command is written as one string so the log and error text
+    # match exactly what ran; every verification argument below is a single
+    # whitespace-free token, hence the plain split.
     $arguments = @($Command -split '\s+')
     # stderr is redirected to a temporary file instead of discarded: argument
     # errors are reported on stderr only, and a swallowed stderr would leave the
@@ -81,7 +82,7 @@ function Invoke-CliJson {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $raw = (& $Exe @arguments 2> $StdErrPath) -join "`n"
+        $raw = (& $Exe @arguments 2> $StdErrPath | Out-String)
         $code = $LASTEXITCODE
         $stdErrRaw = if (Test-Path -LiteralPath $StdErrPath) {
             Get-Content -Raw -LiteralPath $StdErrPath

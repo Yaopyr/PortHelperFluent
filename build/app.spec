@@ -105,12 +105,15 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    # Console subsystem so a shell waits for the process and stdout/exit codes
-    # work for the CLI; hide-early lets the bootloader hide the console window
-    # only when the program owns it (double-click), not when launched from an
-    # existing shell.
-    console=True,
-    hide_console="hide-early",
+    # GUI subsystem: double-clicking the exe creates no console at all.  A
+    # console-subsystem build with the bootloader's hide-early option only hides
+    # the console host window the bootloader owns, and on Windows 11 the default
+    # terminal (Windows Terminal) keeps its own window, so a CLI run from
+    # Explorer left a permanent terminal behind.  CLI invocations still work
+    # because they inherit stdout/stderr/pipes from the launching shell; the
+    # rare case without standard streams is handled by
+    # app.cli.output.ensure_console_streams() (AttachConsole/AllocConsole).
+    console=False,
     icon=str(ICON_PATH),
     version=str(VERSION_PATH),
 )

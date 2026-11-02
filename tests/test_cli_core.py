@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app import APP_VERSION
+from app.cli import output as output_module
 from app.cli.errors import (
     EXIT_EXPECT,
     EXIT_INTERNAL,
@@ -30,6 +31,7 @@ from app.cli.output import (
     add_output_options,
     configure_stdio,
     emit_event,
+    ensure_console_streams,
     envelope_error,
     envelope_ok,
     write_payload,
@@ -202,6 +204,45 @@ def test_configure_stdio_reconfigures_non_utf8_streams(monkeypatch) -> None:
         {"encoding": "utf-8", "errors": "replace", "newline": "\n"}
     ]
     assert fake_stderr.calls == []
+
+
+def test_ensure_console_streams_is_noop_with_existing_streams(monkeypatch) -> None:
+    """stdout/stderr 都在时直接返回，绝不调用 AttachConsole。
+
+    管道/重定向/终端下附着控制台会把输出从管道路由到控制台，Agent 就捕获不到
+    JSON 了；因此只断言 no-op 路径，不真的 AttachConsole/AllocConsole（测试进程
+    会因此开出控制台窗口）。
+    """
+    calls: list[tuple] = []
+
+    class _Kernel32:
+        def AttachConsole(self, pid: int) -> int:
+            calls.append(("AttachConsole", pid))
+            return 0
+
+        def AllocConsole(self) -> int:
+            calls.append(("AllocConsole",))
+            return 1
+
+    class _Windll:
+        def __init__(self) -> None:
+            self.kernel32 = _Kernel32()
+
+    class _Ctypes:
+        def __init__(self) -> None:
+            self.windll = _Windll()
+
+    monkeypatch.setattr(output_module, "ctypes", _Ctypes())
+    fake_stdout = io.StringIO()
+    fake_stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    monkeypatch.setattr(sys, "stderr", fake_stderr)
+
+    ensure_console_streams()
+
+    assert calls == []
+    assert sys.stdout is fake_stdout
+    assert sys.stderr is fake_stderr
 
 
 def test_add_output_options_defaults_and_choices() -> None:

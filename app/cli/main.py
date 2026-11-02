@@ -33,7 +33,13 @@ from app.cli.commands import (
     update,
 )
 from app.cli.errors import EXIT_INTERNAL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, CliError
-from app.cli.output import configure_stdio, envelope_error, envelope_ok, write_payload
+from app.cli.output import (
+    configure_stdio,
+    ensure_console_streams,
+    envelope_error,
+    envelope_ok,
+    write_payload,
+)
 
 __all__ = ["build_parser", "run"]
 
@@ -87,6 +93,7 @@ def run(
     selftest_report: Callable[[], dict[str, Any]] | None = None,
 ) -> int:
     """执行一次 CLI 调用并返回进程退出码；stdout 只输出 JSON（``help`` 除外）。"""
+    ensure_console_streams()
     configure_stdio()
     started = time.perf_counter()
     parser = build_parser(selftest_report=selftest_report)

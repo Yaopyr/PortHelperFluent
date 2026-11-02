@@ -6,6 +6,7 @@ Agent 不应依赖其排版。
 
 from __future__ import annotations
 
+import ctypes
 import json
 import sys
 from typing import Any
@@ -17,6 +18,7 @@ __all__ = [
     "add_output_options",
     "configure_stdio",
     "emit_event",
+    "ensure_console_streams",
     "envelope_error",
     "envelope_ok",
     "write_payload",
@@ -25,6 +27,35 @@ __all__ = [
 
 # `sys.stdout.encoding` 可能写成 `utf-8` / `UTF8` / `utf_8`，按下表归一后比较。
 _UTF8_ENCODINGS = frozenset({"utf-8", "utf8"})
+
+
+def ensure_console_streams() -> None:
+    """GUI 子系统的 exe 在缺少标准流时兜底接上控制台（仅 Windows）。
+
+    ``console=False`` 的 exe 被 shell/Agent 调用时继承父进程的 stdout/stderr（管道、
+    重定向或普通终端），行为与源码运行一致，此时本函数立即返回：绝不 ``AttachConsole``
+    以免把输出从管道挪到控制台，破坏 Agent 的捕获。只有两个流都缺失（极少见，例如
+    从无标准句柄的宿主直接拉起）才附着到父进程控制台，失败则新建一个，再用
+    ``CONOUT$`` 重建缺失的流。任何失败都静默，CLI 仍以其余路径尽力输出。
+    """
+    if sys.platform != "win32":
+        return
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.AttachConsole(-1) == 0:
+            kernel32.AllocConsole()
+        for name in ("stdout", "stderr"):
+            if getattr(sys, name) is not None:
+                continue
+            try:
+                stream = open("CONOUT$", "w", encoding="utf-8", errors="replace", newline="\n")
+            except Exception:
+                continue
+            setattr(sys, name, stream)
+    except Exception:
+        pass
 
 
 def configure_stdio() -> None:
