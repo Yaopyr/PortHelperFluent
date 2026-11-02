@@ -239,6 +239,7 @@ def run_send(args) -> dict[str, Any]:
             repeat=repeat,
             interval_ms=interval_ms,
             matcher=matcher,
+            pair_unknown=address is None,
         )
     )
 

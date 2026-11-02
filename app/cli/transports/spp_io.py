@@ -7,7 +7,9 @@
 关闭」，``close`` 始终在 ``finally`` 里执行。
 
 配对提示由 CLI 直接回答：``--pin`` 回应 ``pin`` 请求，``--confirm`` 自动接受确认请求；
-两者都没给且设备未配对时不会开始配对，而是给出「请先在系统设置中配对」的提示。
+两者都没给且设备未配对时，``--address`` 扫描已知配对状态，直接给出「请先在系统设置中
+配对」的提示；``--device-id`` 的配对状态未知，会先调 ``pair``（已配对返回
+``ALREADY_PAIRED``），失败后再给出同一条提示。
 运行中设备断开通过 ``set_disconnect_callback`` 置 ``asyncio.Event``，读循环立即以
 ``device_unavailable``/3 结束，不会一直等到 ``--timeout``。
 
@@ -145,11 +147,16 @@ async def send(
     interval_ms: int = 100,
     matcher=None,
     emit=None,
+    pair_unknown: bool = False,
 ) -> dict[str, Any]:
     """按需配对后连接、发送并读取回包，返回 ``sent``/``received``/``matched``/``device``。
 
     - 已配对设备直接 RFCOMM；未配对时先让后端 ``pair``（PIN 提示由 ``pin`` 回答，
-      确认提示由 ``confirm`` 接受）；未配对且两个参数都没给时直接提示先配对。
+      确认提示由 ``confirm`` 接受）。
+    - ``pair_unknown`` 用于 ``--device-id`` 这类「配对状态未知」的目标：未配对且没有
+      ``pin``/``confirm`` 时仍调用 ``pair``（已配对设备会返回 ``ALREADY_PAIRED``），
+      失败才给出 ``--pin/--confirm`` 提示；``pair_unknown=False`` 时不会开始配对，
+      直接提示先配对。
     - 发送 ``repeat`` 次，只在两次之间按 ``interval_ms`` 停顿；随后给了 ``matcher``
       就等待命中（截止 ``timeout``），否则按 ``read_for`` 做固定窗口读取（0 不读）。
     - 运行中设备断开时断开回调经 ``loop.call_soon_threadsafe`` 置事件，读循环立即抛
@@ -157,7 +164,8 @@ async def send(
     ``emit`` 保留给将来的流式输出，``spp send`` 不是流式命令，不产生 NDJSON 事件。
     """
     payload = bytes(data)
-    if not getattr(device, "paired", False) and not pin and not confirm:
+    hint_only = not getattr(device, "paired", False) and not pin and not confirm
+    if hint_only and not pair_unknown:
         raise CliError("device_unavailable", NOT_PAIRED_MESSAGE, EXIT_OPERATION)
 
     # 只有真正需要配对时才导入，模块导入阶段不触碰 WinRT/PyQt6。
@@ -198,6 +206,10 @@ async def send(
         if not getattr(device, "paired", False):
             status = await _pair(backend, device, timeout)
             if status not in PAIR_SUCCESS:
+                if hint_only:
+                    raise CliError(
+                        "device_unavailable", NOT_PAIRED_MESSAGE, EXIT_OPERATION
+                    )
                 raise CliError(
                     "device_unavailable", pair_status_text(status), EXIT_OPERATION
                 )

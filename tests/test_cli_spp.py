@@ -424,17 +424,52 @@ def test_send_already_paired_status_does_not_prompt(cli, monkeypatch) -> None:
     assert _count(fake, "connect") == 1
 
 
-def test_send_requires_pin_or_confirm_for_unpaired(cli, monkeypatch) -> None:
-    fake = _install(monkeypatch, FakeSppBackend())
+def test_send_requires_pin_or_confirm_for_unpaired_address(cli, monkeypatch) -> None:
+    fake = _install(
+        monkeypatch, FakeSppBackend(devices=[_device("Phone", _ADDRESS, False, "id-1")])
+    )
+
+    payload = cli(
+        ["spp", "send", "--address", _ADDRESS, "--scan-duration", "0.1", "--text", "AT"]
+    )
+
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "device_unavailable"
+    assert "--pin/--confirm" in payload["error"]["message"]
+    assert _count(fake, "scan") == 1
+    assert _count(fake, "pair") == 0
+    assert _count(fake, "connect") == 0
+    assert _count(fake, "send") == 0
+
+
+def test_device_id_pair_unknown_resolves_already_paired(cli, monkeypatch) -> None:
+    fake = _install(
+        monkeypatch, FakeSppBackend(pair_status="ALREADY_PAIRED")
+    )
+
+    payload = cli(["spp", "send", "--device-id", "id-1", "--text", "AT", "--read-for", "0"])
+
+    assert payload["exit_code"] == 0
+    assert fake.prompts == []
+    assert _count(fake, "pair") == 1
+    assert _count(fake, "connect") == 1
+    assert _count(fake, "send") == 1
+    assert _count(fake, "close") == 1
+
+
+def test_device_id_pair_unknown_rejection_hints_pin_confirm(cli, monkeypatch) -> None:
+    fake = _install(
+        monkeypatch, FakeSppBackend(pair_status="AUTHENTICATIONREJECTED")
+    )
 
     payload = cli(["spp", "send", "--device-id", "id-1", "--text", "AT"])
 
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "device_unavailable"
     assert "--pin/--confirm" in payload["error"]["message"]
-    assert _count(fake, "pair") == 0
+    assert _count(fake, "pair") == 1
     assert _count(fake, "connect") == 0
-    assert _count(fake, "send") == 0
+    assert _count(fake, "close") == 1
 
 
 def test_send_pair_rejection_maps_to_device_unavailable(cli, monkeypatch) -> None:
@@ -511,6 +546,65 @@ def test_send_repeat_writes_and_reports_totals(cli, monkeypatch) -> None:
     assert payload["exit_code"] == 0
     assert payload["data"]["sent"] == {"bytes": 4, "writes": 2}
     assert fake.sent == [b"AT", b"AT"]
+
+
+def test_send_expect_hex_matches_raw_bytes(cli, monkeypatch) -> None:
+    _install(
+        monkeypatch,
+        FakeSppBackend(
+            devices=[_device("Phone", _ADDRESS, True)], reply_chunks=(b"\x01\x02",)
+        ),
+    )
+
+    payload = cli(
+        [
+            "spp",
+            "send",
+            "--address",
+            _ADDRESS,
+            "--scan-duration",
+            "0.1",
+            "--text",
+            "AT",
+            "--expect-hex",
+            "0102",
+            "--timeout",
+            "0.1",
+            "--read-for",
+            "0",
+        ]
+    )
+
+    assert payload["exit_code"] == 0
+    assert payload["data"]["matched"] is True
+    assert payload["data"]["received"]["hex"] == "0102"
+
+
+def test_send_format_text_is_readable(cli, monkeypatch) -> None:
+    _install(
+        monkeypatch,
+        FakeSppBackend(devices=[_device("Phone", _ADDRESS, True)]),
+    )
+
+    payload = cli(
+        [
+            "spp",
+            "send",
+            "--address",
+            _ADDRESS,
+            "--scan-duration",
+            "0.1",
+            "--text",
+            "AT",
+            "--read-for",
+            "0",
+            "--format",
+            "text",
+        ]
+    )
+
+    assert payload["exit_code"] == 0
+    assert "matched" in payload["raw"]
 
 
 def test_send_expect_timeout_exits_4_and_closes(cli, monkeypatch) -> None:
@@ -661,6 +755,29 @@ def test_com_channel_uses_serial_transport(cli, monkeypatch) -> None:
     assert data["modem"] == {"cts": True, "dsr": False, "ring": False, "rlsd": True}
     assert transport.writes == [b"AT"]
     assert transport.config.port == "COM9"
+    assert transport.closed is True
+
+
+def test_com_format_text_is_readable(cli, monkeypatch) -> None:
+    transport = _install_transport(monkeypatch, FakeTransport([b"OK"]))
+
+    payload = cli(
+        [
+            "spp",
+            "com",
+            "--port",
+            "COM9",
+            "--text",
+            "AT",
+            "--expect",
+            "OK",
+            "--format",
+            "text",
+        ]
+    )
+
+    assert payload["exit_code"] == 0
+    assert "matched" in payload["raw"]
     assert transport.closed is True
 
 
