@@ -28,6 +28,7 @@ from app.cli.commands import (
     image,
     net,
     serial,
+    spp,
     system,
     update,
 )
@@ -75,6 +76,7 @@ def build_parser(
     hid.register(subparsers)
     ble.register(subparsers)
     serial.register(subparsers)
+    spp.register(subparsers)
     update.register(subparsers)
     return parser
 
