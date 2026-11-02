@@ -61,11 +61,11 @@ argv[0] 命中 CLI 命令（checksum/convert/image/dotmatrix/c51/serial/net/hid/
 - `app/cli/main.py` 统一负责 argparse、JSON/NDJSON 输出、异常收敛与退出码 0/1/2/3/4/130；`commands/*` 只做参数映射与结果组装，`transports/*` 提供无头 IO 并允许测试注入假实现。
 - 流式命令（`serial monitor`、`hid monitor`、`ble notify`、`net server`、`net udp --listen-only`）逐行输出 NDJSON，最后一行仍是标准信封；`--duration` 强制有界。
 
-打包为控制台子系统并设置 `hide_console="hide-early"`：
+打包为 GUI 子系统（`console=False`），双击不创建任何控制台：
 
-- 双击时 Windows 为程序新建控制台，bootloader 判定「程序自己拥有」后立即隐藏，GUI 正常显示。
-- 从 PowerShell/cmd/Agent 启动时控制台属于父进程，不隐藏；stdout/stderr 与退出码可用，shell 会等待进程结束。
-- Agent 用管道捕获输出时 stdout 是管道，不受控制台隐藏影响。
+- 双击：没有控制台/终端窗口，直接显示 GUI。曾用「控制台子系统 + `hide_console="hide-early"`」，但 Windows 11 默认终端 Windows Terminal 的窗口属于 Terminal 进程，exe 只能隐藏 bootloader 自建的控制台宿主，无法关闭该窗口，故放弃。
+- CLI 通过继承的 stdout/stderr/管道工作：PowerShell/cmd 调用时输出与退出码可用；Agent 的 `subprocess.run(capture_output=True)` 自动等待。交互式 PowerShell 直接调用不会等待，需 `| Out-String` 或 `Start-Process -Wait`。
+- 两个标准流都缺失时才由 `app.cli.output.ensure_console_streams()` 兜底（`AttachConsole(-1)`，失败 `AllocConsole()`，`CONOUT$` 重建流）；流已存在时直接返回，绝不附着控制台，避免把输出从管道挪走。
 - 限制：onefile 每次 CLI 调用都要解压运行时，启动不是零成本；CLI 不提供常驻/会话复用，也不写 `logs/app.log`（`selftest` 例外）。
 
 ## 模块地图
@@ -261,7 +261,7 @@ IO 信号 → LogPane.append_bytes()
 
 ## 打包
 
-- `build/app.spec`：PyInstaller onefile、控制台子系统 + `hide_console="hide-early"`（双击隐藏新建控制台、终端调用保留 stdout/退出码）、图标、版本信息、qfluentwidgets 资源、hidapi/qrcode/Pillow/numpy/psutil/pyserial。
+- `build/app.spec`：PyInstaller onefile、GUI 子系统（`console=False`，双击不创建控制台、CLI 走继承的 stdout/管道，无标准流时由 `ensure_console_streams()` 兜底）、图标、版本信息、qfluentwidgets 资源、hidapi/qrcode/Pillow/numpy/psutil/pyserial。
 - 蓝牙依赖用 `collect_submodules("bleak") + collect_submodules("winrt")` 显式收集：`winrt-*` 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩；`main.py` 的 `--selftest` 与 `build/build.ps1` 都会断言 `bleak`、`winrt.windows.devices.bluetooth.rfcomm`、`winrt.windows.networking.sockets` 三项可导入。
 - 排除 PyQt5、WebEngine、Quick/QML、3D、Multimedia、tkinter、matplotlib、scipy、pandas。
 - 不使用 UPX；不请求管理员权限。

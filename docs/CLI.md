@@ -7,6 +7,7 @@ PortHelper Fluent 的同一个可执行文件同时提供图形界面与命令�
 - 源码入口等价：`python main.py checksum ...`（本文示例统一用源码入口，换成 exe 名即可）。
 - 离线工具（校验、转换、图片、点阵、C51、配置、版本）启动时不导入 PyQt6；硬件命令按需加载后端类，但不启动 Qt 事件循环。
 - 每次 CLI 调用都是独立进程；onefile exe 每次启动都要解压运行时，因此不承诺毫秒级启动。
+- 打包为 GUI 子系统（`console=False`）：双击 exe 只开 GUI、不创建控制台；CLI 使用继承的标准流与管道，Agent 的 `subprocess.run(capture_output=True)` 会被正常等待。交互式 PowerShell 里直接调用不会等待进程，需要输出/退出码时请用 `| Out-String` 或 `Start-Process -Wait -PassThru`。
 
 ```text
 PortHelperFluent.exe <group> <action> [options]
@@ -210,7 +211,7 @@ TCP/UDP 用标准库 `socket`，不依赖 QtNetwork。
 
 ## Agent 示例
 
-以下命令可直接在 Windows PowerShell 中复制执行；把 `python main.py` 换成 `PortHelperFluent.exe` 即为打包后的用法。示例 2 需要 `.\assets` 是包含图片的文件夹（可换成任意图片目录）；示例 3 需要真实 `COM3` 端口与设备（按实际端口修改）；示例 4 需要先启动服务端，再在另一个终端运行客户端。
+以下命令可直接在 Windows PowerShell 中复制执行；把 `python main.py` 换成 `PortHelperFluent.exe` 即为打包后的用法（交互式 PowerShell 里调用 exe 需要等待结果时加 `| Out-String`，见「限制与注意」）。示例 2 需要 `.\assets` 是包含图片的文件夹（可换成任意图片目录）；示例 3 需要真实 `COM3` 端口与设备（按实际端口修改）；示例 4 需要先启动服务端，再在另一个终端运行客户端。
 
 **1. 校验已知向量（期望 `CBF43926`）**
 
@@ -257,3 +258,4 @@ python main.py c51 export --config-json '{"crystal_mhz":12.0}' --out-dir .\keil-
 - 输出默认紧凑 JSON；`--pretty` 只适用于非流式命令。二进制数据只写文件，`data` 中返回路径。
 - `net server` 有客户端上限（默认 16）与运行时长上限；流式命令都不会无限运行。
 - 不提供 MCP Server、常驻守护进程、会话复用、TUI 或交互式提示；每次调用都是独立进程。
+- exe 是 GUI 子系统（`console=False`）：双击只开 GUI，不创建控制台；CLI 依赖继承的标准流。交互式 PowerShell 直接调用不会等待进程结束，`$LASTEXITCODE` 可能是旧值——需要输出与退出码时用 `& PortHelperFluent.exe version | Out-String` 或 `Start-Process -Wait -PassThru`；Agent 的 `subprocess.run(capture_output=True)` 无需额外处理。两个标准流都缺失的极少数场景由 `ensure_console_streams()`（`AttachConsole`/`AllocConsole`）兜底。

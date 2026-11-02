@@ -69,7 +69,7 @@ python -m pytest
 - 串口/HID 假传输、蓝牙 BLE/SPP 假设备、页面离屏实例化、真实按钮点击；
 - CLI 命令注册、JSON 信封与退出码、输入解析、流式命令有界结束、假后端与本机 TCP/UDP 回环。
 
-当前基线：**1225 项测试**（含 CLI 离线/假后端/本机回环测试；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1202 项）。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
+当前基线：**1226 项测试**（含 CLI 离线/假后端/本机回环测试；图形环境受限时可 `python -m pytest --ignore=tests/test_main_window.py`，通过 1203 项）。硬件 I/O（串口/HID/蓝牙）、Keil 打开工程属于手工验收。
 
 单独跑某类测试：
 
@@ -86,13 +86,15 @@ python -m pytest tests/test_ui_layout.py tests/test_main_window.py -v
 CLI 与 GUI 是同一个 exe，构建后可直接在终端验证（不需要打开窗口）：
 
 ```powershell
-dist\PortHelperFluent.exe version
-dist\PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC"
-dist\PortHelperFluent.exe convert base --value 255 --from-base 10 --bits 8
+dist\PortHelperFluent.exe version | Out-String
+dist\PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC" | Out-String
+dist\PortHelperFluent.exe convert base --value 255 --from-base 10 --bits 8 | Out-String
 dist\PortHelperFluent.exe help
 ```
 
 期望：`version` 的 `data.version` 为 `1.2.0`；checksum 返回 `CBF43926`；`convert base` 的 16 进制输出为 `FF`；stdout 是 JSON 信封，退出码 0。参数错误（例如缺少子命令）应输出 `{"ok": false, ...}` 并以退出码 2 结束，stderr 有一行摘要。
+
+exe 是 GUI 子系统（`console=False`），交互式 PowerShell 里直接调用**不会等待进程**，所以上面用 `| Out-String` 强制等待并收集输出；需要显式退出码时用 `& dist\PortHelperFluent.exe version | Out-String; $LASTEXITCODE` 或 `Start-Process -Wait -PassThru`。Agent 的 `subprocess.run(..., capture_output=True)` 天然等待，无需管道。
 
 `build/build.ps1` 会在隔离临时目录里对交付副本执行同样的三项断言，并在 `dist/build.log` 的 `Packaged verification` 段记录 `cli version` / `cli checksum` / `cli convert base`；构建完成后还会检查 `dist/` 下**恰好一个 exe**。
 
@@ -107,7 +109,7 @@ powershell -ExecutionPolicy Bypass -File build/build.ps1
 1. 清理 `dist/` 与 `build_work/`；
 2. 运行全量 pytest（失败即中止）；
 3. 重新生成 `build/icon.ico`；
-4. 用 `build/app.spec` 构建 onefile 控制台程序；
+4. 用 `build/app.spec` 构建 onefile 图形程序（GUI 子系统，不带控制台）；
 5. 检查 `dist/` 下恰好一个 exe；
 6. 校验归档中不含 `analysis/`、`docs/`、`tests/`、`.git`、PyQt5、WebEngine；
 7. 从隔离临时目录执行 `--selftest`、`--smoke-test`，并对交付副本执行 `version`、`checksum`、`convert base` 三项 CLI 断言；
@@ -123,15 +125,17 @@ dist\build.log
 
 示例产物约 60 MB，具体大小/SHA 以构建日志为准。构建脚本不会提交二进制；`dist/` 已在 `.gitignore` 中。
 
-### 控制台子系统与双击行为
+### GUI 子系统与双击行为
 
-`build/app.spec` 使用 `console=True` + `hide_console="hide-early"`，让同一个 exe 同时服务 GUI 与 CLI：
+`build/app.spec` 使用 `console=False`（GUI 子系统），让同一个 exe 同时服务 GUI 与 CLI：
 
-- 双击：Windows 为程序新建控制台，bootloader 判定「程序自己拥有该控制台」后立即隐藏，只显示 GUI，不会留下黑窗口。
-- 从 PowerShell/cmd/Agent 启动：控制台属于父进程，不会被隐藏；stdout/stderr 与退出码可直接读取，shell 会等待进程结束。
-- Agent 用管道捕获输出：stdout 是管道，不受控制台隐藏影响。
-- 限制：onefile 每次 CLI 调用都要重新解压运行时，启动有固定开销；CLI 不提供常驻/会话复用；若从某些不支持控制台的环境（如无窗口服务）启动，输出仍应通过管道读取。
-- 验收必须覆盖三种场景：双击无残留控制台、PowerShell 调用有输出、资源管理器启动 GUI 正常。
+- 双击：不创建任何控制台/终端，直接显示 GUI，不会残留窗口。
+- CLI 走继承的标准流：从 PowerShell/cmd 调用时 stdout/stderr 与退出码正常可用；Agent 用 `subprocess.run(..., capture_output=True)` 会被自动等待，能完整拿到 JSON 与退出码。
+- 交互式 PowerShell 直接调用 GUI 子系统的 exe 不会等待进程：调用运算符立即返回，`$LASTEXITCODE` 可能是旧值。需要等待结果/拿退出码时必须用管道或显式等待，例如 `& dist\PortHelperFluent.exe version | Out-String`、`Start-Process -Wait -PassThru`（构建脚本里的 `Invoke-CliJson` 就是用 `| Out-String` 强制等待）。
+- 为什么放弃 `hide_console="hide-early"`：Windows 11 的默认终端是 Windows Terminal（窗口类 `CASCADIA_HOSTING_WINDOW_CLASS`），窗口属于 Terminal 进程；PyInstaller 的 hide 只操作 bootloader 自建的控制台宿主窗口，无法隐藏/关闭 Terminal 窗口，双击或命令行调用仍会残留常驻终端。改用 GUI 子系统后双击根本不创建控制台，问题从根上消失。
+- 极少见的无标准流场景（例如从没有标准句柄的宿主直接拉起 CLI）：`app.cli.output.ensure_console_streams()` 在 `sys.stdout`/`sys.stderr` 缺失时才 `AttachConsole(-1)`，失败再 `AllocConsole()`，并用 `CONOUT$` 重建缺失的流；两个流都在时直接返回，绝不附着控制台（否则会把输出从管道挪到控制台，破坏 Agent 捕获）。所有 ctypes 异常静默。
+- 限制：onefile 每次 CLI 调用都要重新解压运行时，启动有固定开销；CLI 不提供常驻/会话复用。
+- 验收：双击无控制台/终端窗口、GUI 正常；PowerShell 直接调用有 JSON 输出；`| Out-String` 与 `Start-Process -Wait` 能等到退出码；Agent 管道捕获正常。
 
 ### 手动打包（等价命令）
 
@@ -139,7 +143,7 @@ dist\build.log
 python -m PyInstaller --noconfirm --clean --distpath dist --workpath build_work build/app.spec
 ```
 
-`build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial、bleak 与 winrt，以及图标/版本信息。bleak 与 winrt 用 `collect_submodules` 收集全部子模块——WinRT 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩。不要额外关闭这些依赖，否则运行时会缺模块。不要在 spec 里恢复 `console=False`，否则 shell 不会等待窗口子系统进程，Agent 的 stdout/退出码不可靠。
+`build/app.spec` 已包含 qfluentwidgets 资源、hidapi、qrcode、Pillow、numpy、psutil、pyserial、bleak 与 winrt，以及图标/版本信息。bleak 与 winrt 用 `collect_submodules` 收集全部子模块——WinRT 的实现是 `.pyd`，modulegraph 跟不进去，漏收会让 exe 启动即崩。不要额外关闭这些依赖，否则运行时会缺模块。不要在 spec 里改回 `console=True` + `hide_console`：Windows 11 的默认终端是 Windows Terminal，hide 只能操作 bootloader 自建的控制台宿主窗口，无法关闭 Terminal 窗口，会留下常驻终端；CLI 的等待问题由调用方用管道或 `Start-Process -Wait` 解决。
 
 ## 发布 Release
 
@@ -275,4 +279,4 @@ qfluentwidgets 的 acrylic 辅助代码引用了可选模块；本项目使用 M
 - [ ] C51：Keil 打开 `M51Project.Uv2`，编译 `Main.c`；核对定时/波特率。
 - [ ] 设置：浅色/深色、强调色、日志上限、配置导出/重置、便携模式。
 - [ ] exe：从无 Python 环境的目录启动，`--selftest`/`--smoke-test` 通过。
-- [ ] CLI：双击 exe 不出现残留控制台窗口；PowerShell 运行 `PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC"` 有 JSON 输出且退出码为 0；串口/HID/蓝牙命令用真实设备执行 `list`/`send` 一次。
+- [ ] CLI：双击 exe 不出现控制台/终端窗口；PowerShell 运行 `dist\PortHelperFluent.exe checksum --text 123456789 --only "CRC-32/ISO-HDLC" | Out-String` 有 JSON 输出且退出码为 0；Agent 用 `subprocess.run(capture_output=True)` 能拿到同一份输出；串口/HID/蓝牙命令用真实设备执行 `list`/`send` 一次。

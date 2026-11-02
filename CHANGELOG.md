@@ -25,7 +25,7 @@
 
 ### Changed
 
-- 打包改为控制台子系统 + `hide_console="hide-early"`：双击时隐藏程序自建的控制台，PowerShell/cmd/Agent 调用时保留 stdout/stderr 与退出码，shell 正常等待进程结束。
+- 打包改为 GUI 子系统（`console=False`）：双击不再创建任何控制台/终端窗口；CLI 通过继承的 stdout/stderr/管道工作，Agent 的 `subprocess.run(capture_output=True)` 正常等待，交互式 PowerShell 需 `| Out-String` 或 `Start-Process -Wait` 才等待；无标准流的极少数场景由 `ensure_console_streams()`（`AttachConsole`/`AllocConsole`）兜底。放弃 `hide_console="hide-early"`——Windows 11 默认终端 Windows Terminal 的窗口由 Terminal 进程拥有，exe 无法隐藏，会残留常驻终端。
 - `build/build.ps1` 新增交付副本的 `version`、`checksum`、`convert base` 三项 CLI 断言与 `dist/` 单 exe 检查，结果写入 `build.log`。
 - 版本号升至 1.2.0（`app/__init__.py` 与 `build/version_info.txt` 同步）。
 - 测试基线更新为 1220 项；`tests/test_version_sync.py` 锁定应用版本与 `build/version_info.txt`、发布文档、CHANGELOG 的同步关系。
