@@ -3,8 +3,8 @@
 - ``list``：枚举设备，按 product/manufacturer/serial 与 vid/pid 过滤；
 - ``send``：按 ``--index``/``--path-b64``/``--vid+--pid`` 选设备 → 用 ``build_report``
   构造报告 → 按 ``--repeat`` 写入 → 可选读一次输入报告 → 关闭；
-- ``monitor``：打开后循环读取，按 NDJSON 输出 ``start``/``data``/``error``/``end``
-  事件，由 ``--duration``/``--max-bytes``/``--max-events`` 保证有界。
+- ``monitor``：打开后循环读取，只逐条输出 ``data`` 事件，返回时长/字节/事件汇总，
+  由 ``--duration``/``--max-bytes``/``--max-events`` 保证有界。
 
 复用 :mod:`app.io.hid_worker` 的 ``HidDeviceInfo``/``HidapiBackend``/``build_report``，
 但不启动 ``HidWorker``；这些导入都由 :mod:`app.cli.transports.hid_io` 在函数内部
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import time
 from typing import Any
 
@@ -83,7 +84,9 @@ def run_list(args) -> dict[str, Any]:
     devices = hid_io.enumerate_devices(hid_io.new_backend())
     rows: list[dict[str, Any]] = []
     for index, info in enumerate(devices):
-        haystack = f"{info.product} {info.manufacturer} {info.serial}".lower()
+        haystack = (
+            f"{info.product} {info.manufacturer} {info.serial} {info.id_text}".lower()
+        )
         if needle and needle not in haystack:
             continue
         if vid is not None and info.vendor_id != vid:
@@ -131,6 +134,12 @@ def _register_send(subparsers) -> None:
     )
     _add_device_options(parser)
     add_input_options(parser, required=True)
+    parser.add_argument(
+        "--encoding",
+        default="utf-8",
+        metavar="CODEC",
+        help="输入文本与 input_report.text 的编码，默认 utf-8。",
+    )
     parser.add_argument(
         "--report-id",
         type=int,
@@ -183,7 +192,7 @@ def _register_send(subparsers) -> None:
 
 
 def run_send(args) -> dict[str, Any]:
-    """写入报告并按需读一次输入报告，返回 ``written``/``report``/``input_report``。"""
+    """写入报告并按需读一次输入报告，返回 ``written``/``report``/``device``。"""
     data = read_input(args)
     report_id = _bounded_int(
         getattr(args, "report_id", _DEFAULT_REPORT_ID),
@@ -214,24 +223,37 @@ def run_send(args) -> dict[str, Any]:
     except ValueError as exc:
         raise CliError("usage", f"发送参数无效：{exc}", EXIT_USAGE) from exc
 
-    backend, info, handle = _open_device(args)
-    written = 0
+    backend, info, index, handle = _open_device(args)
+    writes = 0
+    total = 0
     input_report: dict[str, Any] | None = None
     try:
         for position in range(repeat):
             if position and interval_ms:
                 time.sleep(interval_ms / 1000.0)
             try:
-                written += int(backend.write(handle, report))
+                written = int(backend.write(handle, report))
+            except CliError:
+                raise
             except Exception as exc:
                 raise CliError(
                     "device_unavailable",
                     f"向 HID 设备 {_ident(info)} 写入报告失败：{exc}",
                     EXIT_OPERATION,
                 ) from exc
+            if written < 0:
+                raise CliError(
+                    "device_unavailable",
+                    f"向 HID 设备 {_ident(info)} 写入报告失败：设备返回 {written}。",
+                    EXIT_OPERATION,
+                )
+            writes += 1
+            total += written
         if bool(getattr(args, "read", False)):
             try:
                 raw = backend.read(handle, read_length, int(timeout * 1000))
+            except CliError:
+                raise
             except Exception as exc:
                 raise CliError(
                     "device_unavailable",
@@ -241,17 +263,20 @@ def run_send(args) -> dict[str, Any]:
             raw = bytes(raw) if raw else b""
             input_report = {
                 "hex": raw.hex(),
-                "text": decode_bytes(raw, "utf-8"),
+                "text": decode_bytes(raw, data.encoding),
                 "size": len(raw),
             }
     finally:
         _close(backend, handle)
 
-    return {
-        "written": written,
+    result: dict[str, Any] = {
+        "written": {"writes": writes, "bytes": total},
         "report": report.hex(),
-        "input_report": input_report,
+        "device": hid_io.device_summary(info, index),
     }
+    if input_report is not None:
+        result["input_report"] = input_report
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +306,7 @@ def _register_monitor(subparsers) -> None:
 
 
 def run_monitor(args) -> dict[str, Any]:
-    """流式读取 HID 输入报告，返回 ``duration_s``/``bytes``/``events``。"""
+    """流式读取 HID 输入报告，返回 ``duration_s``/``bytes``/``events``/``report_length``。"""
     _require_ndjson(args)
     if getattr(args, "until", None) is not None or getattr(args, "until_hex", None) is not None:
         raise CliError(
@@ -298,45 +323,29 @@ def run_monitor(args) -> dict[str, Any]:
         _MAX_REPORT_LENGTH,
     )
 
-    backend, info, handle = _open_device(args)
+    backend, info, _index, handle = _open_device(args)
     started = hid_io._clock()
     deadline = started + options.duration
-    emit_event(
-        {
-            "event": "start",
-            "path_b64": hid_io.encode_path(info.path),
-            "vid": f"{info.vendor_id:04X}",
-            "pid": f"{info.product_id:04X}",
-            "product": info.product,
-            "report_length": report_length,
-            "at": hid_io._timestamp(),
-        }
-    )
-
     total = 0
     events = 0
     try:
         while True:
             # 每一轮（包括空块）都重新检查截止时间，保证不会越界等待。
-            if deadline - hid_io._clock() <= 0:
+            remaining = deadline - hid_io._clock()
+            if remaining <= 0:
                 break
+            # 单次 read 的等待窗口收缩到剩余时间，避免读超时越过 --duration。
+            timeout_ms = max(1, int(min(hid_io.READ_TIMEOUT_MS, remaining * 1000)))
             try:
-                chunk = backend.read(handle, report_length, hid_io.READ_TIMEOUT_MS)
+                chunk = backend.read(handle, report_length, timeout_ms)
+            except CliError:
+                raise
             except Exception as exc:
-                error = CliError(
+                raise CliError(
                     "device_unavailable",
                     f"读取 HID 设备 {_ident(info)} 失败：{exc}",
                     EXIT_OPERATION,
-                )
-                emit_event(
-                    {
-                        "event": "error",
-                        "code": error.code,
-                        "message": error.message,
-                        "at": hid_io._timestamp(),
-                    }
-                )
-                raise error from exc
+                ) from exc
             chunk = bytes(chunk) if chunk else b""
 
             if options.max_bytes is not None:
@@ -366,13 +375,12 @@ def run_monitor(args) -> dict[str, Any]:
     finally:
         _close(backend, handle)
 
-    summary = {
+    return {
         "duration_s": round(max(hid_io._clock() - started, 0.0), 3),
         "bytes": total,
         "events": events,
+        "report_length": report_length,
     }
-    emit_event({"event": "end", **summary, "at": hid_io._timestamp()})
-    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -429,10 +437,6 @@ def _selection(args) -> dict[str, Any]:
         )
     if (vid_raw is not None) != (pid_raw is not None):
         raise CliError("usage", "--vid 与 --pid 必须同时提供。", EXIT_USAGE)
-    if index is not None and index < 0:
-        raise CliError(
-            "usage", f"--index 必须是非负整数，收到 {index}。", EXIT_USAGE
-        )
     if (serial is not None or interface is not None) and vid_raw is None:
         raise CliError(
             "usage", "--serial/--interface 只能配合 --vid 与 --pid 使用。", EXIT_USAGE
@@ -447,23 +451,25 @@ def _selection(args) -> dict[str, Any]:
     }
 
 
-def _open_device(args) -> tuple[Any, Any, object]:
+def _open_device(args) -> tuple[Any, Any, int, object]:
     """解析并打开设备；打开失败收敛成 ``device_unavailable``。"""
     selection = _selection(args)
     backend = hid_io.new_backend()
     try:
-        info = hid_io.resolve_device(backend=backend, **selection)
+        info, index = hid_io.resolve_device_entry(backend=backend, **selection)
     except ValueError as exc:
         raise CliError("usage", str(exc), EXIT_USAGE) from exc
     try:
         backend, handle = hid_io.open_device(info, backend=backend)
+    except CliError:
+        raise
     except Exception as exc:
         raise CliError(
             "device_unavailable",
-            f"打开 HID 设备 {_ident(info)} 失败：{exc}",
+            f"打开 HID 设备失败：{exc}（{_ident(info)}）",
             EXIT_OPERATION,
         ) from exc
-    return backend, info, handle
+    return backend, info, index, handle
 
 
 def _ident(info: Any) -> str:
@@ -475,9 +481,21 @@ def _ident(info: Any) -> str:
 
 
 def _close(backend, handle) -> None:
-    """关闭句柄；关闭失败不覆盖已有结果或错误。"""
+    """关闭句柄；关闭失败只向 stderr 写一行摘要，不覆盖已有结果或错误。"""
     try:
         backend.close(handle)
+    except Exception as exc:
+        _write_stderr(f"警告：关闭 HID 设备失败：{exc}")
+
+
+def _write_stderr(message: str) -> None:
+    """窗口化 exe 的 stderr 可能不可用：写摘要失败时静默跳过。"""
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        stream.write(message + "\n")
+        stream.flush()
     except Exception:
         pass
 

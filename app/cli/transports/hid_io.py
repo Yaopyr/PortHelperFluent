@@ -23,6 +23,7 @@ __all__ = [
     "new_backend",
     "open_device",
     "resolve_device",
+    "resolve_device_entry",
 ]
 
 # 流式监控的轮询窗口：单次 read 最多越过 --duration 100 ms。
@@ -66,7 +67,7 @@ def build_report(data: bytes, report_id: int = 0, report_length: int = 64) -> by
 
 def encode_path(path: bytes) -> str:
     """把设备路径编码成标准 base64，供 ``hid list`` 的 ``path_b64`` 使用。"""
-    return base64.standard_b64encode(bytes(path)).decode("ascii")
+    return base64.b64encode(bytes(path)).decode("ascii")
 
 
 def decode_path(text: str) -> bytes:
@@ -111,7 +112,29 @@ def resolve_device(
     interface: int | None = None,
     backend: Any = None,
 ) -> Any:
-    """按 ``--index``/``--path-b64``/``--vid+--pid`` 选出唯一设备。
+    """按 ``--index``/``--path-b64``/``--vid+--pid`` 选出唯一设备。"""
+    return resolve_device_entry(
+        index=index,
+        path_b64=path_b64,
+        vid=vid,
+        pid=pid,
+        serial=serial,
+        interface=interface,
+        backend=backend,
+    )[0]
+
+
+def resolve_device_entry(
+    *,
+    index: int | None = None,
+    path_b64: str | None = None,
+    vid: int | None = None,
+    pid: int | None = None,
+    serial: str | None = None,
+    interface: int | None = None,
+    backend: Any = None,
+) -> tuple[Any, int]:
+    """选出唯一设备并返回 ``(设备, 本次枚举中的索引)``。
 
     0 个命中按 ``not_found``（退出码 3）；多个命中按 ``ambiguous_device``（退出码 3），
     ``details`` 是候选摘要列表，不会静默取第一台。``--path-b64`` 解码失败抛出
@@ -129,7 +152,7 @@ def resolve_device(
                 f"没有索引为 {index} 的 HID 设备（本次枚举共 {len(devices)} 个）。",
                 EXIT_OPERATION,
             )
-        return devices[index]
+        return devices[index], index
 
     if path_b64 is not None:
         selected = [
@@ -170,7 +193,7 @@ def resolve_device(
             EXIT_OPERATION,
             details,
         )
-    return selected[0][1]
+    return selected[0][1], selected[0][0]
 
 
 def open_device(info: Any, *, backend: Any = None) -> tuple[Any, object]:

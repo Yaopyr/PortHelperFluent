@@ -101,7 +101,9 @@ class FakeBackend:
         clock: FakeClock | None = None,
         open_error=None,
         write_error=None,
+        write_result: int | None = None,
         read_error=None,
+        close_error=None,
     ) -> None:
         self.devices = list(devices)
         self.chunks = list(chunks)
@@ -111,7 +113,9 @@ class FakeBackend:
         self._clock = clock
         self._open_error = open_error
         self._write_error = write_error
+        self._write_result = write_result
         self._read_error = read_error
+        self._close_error = close_error
 
     def enumerate(self):
         self.calls.append(("enumerate",))
@@ -129,8 +133,10 @@ class FakeBackend:
         self.calls.append(("write", bytes(data)))
         if self._write_error is not None:
             raise self._write_error
-        handle.writes.append(bytes(data))
-        return len(data)
+        result = len(data) if self._write_result is None else self._write_result
+        if result >= 0:
+            handle.writes.append(bytes(data))
+        return result
 
     def read(self, handle, size, timeout_ms):
         self.calls.append(("read", size, timeout_ms))
@@ -143,6 +149,8 @@ class FakeBackend:
     def close(self, handle):
         self.calls.append(("close",))
         handle.closed = True
+        if self._close_error is not None:
+            raise self._close_error
 
 
 def _install(monkeypatch, backend: FakeBackend) -> FakeBackend:
@@ -227,6 +235,7 @@ def test_list_filter_matches_product_manufacturer_and_serial(cli, monkeypatch) -
         ("wid", [0]),
         ("acme", [0, 1]),
         ("sn-2", [1]),
+        ("2222:0002", [1]),
     ):
         payload = cli(["hid", "list", "--filter", needle])
         assert payload["exit_code"] == 0
@@ -288,7 +297,7 @@ def test_send_builds_report_and_writes_once(cli, monkeypatch) -> None:
             "--index",
             "0",
             "--hex",
-            "0102",
+            "01 02",
             "--report-id",
             "1",
             "--report-length",
@@ -297,11 +306,16 @@ def test_send_builds_report_and_writes_once(cli, monkeypatch) -> None:
     )
     assert payload["exit_code"] == 0
     assert payload["command"] == "hid.send"
-    assert payload["data"] == {
-        "written": 4,
-        "report": "01010200",
-        "input_report": None,
-    }
+
+    data = payload["data"]
+    assert data["written"] == {"writes": 1, "bytes": 4}
+    assert data["report"] == "01010200"
+    assert "input_report" not in data
+    assert set(data["device"]) == _LIST_FIELDS
+    assert data["device"]["index"] == 0
+    assert data["device"]["path_b64"] == base64.b64encode(b"p1").decode("ascii")
+    assert data["device"]["vid"] == "1234"
+    assert data["device"]["pid"] == "5678"
 
     writes = [call[1] for call in backend.calls if call[0] == "write"]
     assert writes == [b"\x01\x01\x02\x00"]
@@ -309,6 +323,19 @@ def test_send_builds_report_and_writes_once(cli, monkeypatch) -> None:
     assert _count(backend, "read") == 0
     assert backend.calls[-1] == ("close",)
     assert backend.handle.closed is True
+
+
+def test_send_without_report_id_keeps_payload_first(cli, monkeypatch) -> None:
+    backend = _install(monkeypatch, FakeBackend([_device(b"p1")]))
+
+    payload = cli(
+        ["hid", "send", "--index", "0", "--hex", "01 02", "--report-length", "4"]
+    )
+    assert payload["exit_code"] == 0
+    assert payload["data"]["report"] == "01020000"
+    assert [call[1] for call in backend.calls if call[0] == "write"] == [
+        b"\x01\x02\x00\x00"
+    ]
 
 
 def test_send_reads_input_report_once(cli, monkeypatch) -> None:
@@ -330,6 +357,7 @@ def test_send_reads_input_report_once(cli, monkeypatch) -> None:
         ]
     )
     assert payload["exit_code"] == 0
+    assert payload["data"]["written"] == {"writes": 1, "bytes": 64}
     assert payload["data"]["input_report"] == {
         "hex": "05",
         "text": "\x05",
@@ -340,6 +368,33 @@ def test_send_reads_input_report_once(cli, monkeypatch) -> None:
     ]
     assert _count(backend, "write") == 1
     assert backend.handle.closed is True
+
+
+def test_send_input_report_text_uses_input_encoding(cli, monkeypatch) -> None:
+    backend = _install(
+        monkeypatch, FakeBackend([_device(b"p1")], chunks=["中".encode("gbk")])
+    )
+
+    payload = cli(
+        [
+            "hid",
+            "send",
+            "--index",
+            "0",
+            "--text",
+            "x",
+            "--encoding",
+            "gbk",
+            "--read",
+        ]
+    )
+    assert payload["exit_code"] == 0
+    assert payload["data"]["input_report"] == {
+        "hex": "d6d0",
+        "text": "中",
+        "size": 2,
+    }
+    assert [call[1] for call in backend.calls if call[0] == "write"] == [b"x" + b"\x00" * 63]
 
 
 def test_send_repeat_writes_with_interval_and_reads_once(cli, monkeypatch) -> None:
@@ -366,7 +421,7 @@ def test_send_repeat_writes_with_interval_and_reads_once(cli, monkeypatch) -> No
     )
     assert payload["exit_code"] == 0
     # 默认报告长度 64：两次写入共 128 字节。
-    assert payload["data"]["written"] == 128
+    assert payload["data"]["written"] == {"writes": 2, "bytes": 128}
     assert _count(backend, "write") == 2
     # 间隔只出现在两次写入之间：第一次写之前不 sleep。
     assert sleeps == [0.1]
@@ -428,10 +483,29 @@ def test_send_unknown_vid_pid_is_not_found(cli, monkeypatch) -> None:
     assert payload["error"]["code"] == "not_found"
 
 
-def test_send_index_out_of_range_is_not_found(cli, monkeypatch) -> None:
+def test_send_unknown_path_is_not_found(cli, monkeypatch) -> None:
+    backend = _install(monkeypatch, FakeBackend([_device(b"p1")]))
+
+    payload = cli(
+        [
+            "hid",
+            "send",
+            "--path-b64",
+            base64.b64encode(b"missing").decode("ascii"),
+            "--hex",
+            "00",
+        ]
+    )
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "not_found"
+    assert _count(backend, "open") == 0
+
+
+@pytest.mark.parametrize("index", ["5", "-1"])
+def test_send_index_out_of_range_is_not_found(cli, monkeypatch, index) -> None:
     _install(monkeypatch, FakeBackend([_device()]))
 
-    payload = cli(["hid", "send", "--index", "5", "--hex", "00"])
+    payload = cli(["hid", "send", "--index", index, "--hex", "00"])
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "not_found"
 
@@ -485,6 +559,26 @@ def test_send_rejects_multiple_device_selectors(cli, monkeypatch) -> None:
 
     payload = cli(
         ["hid", "send", "--index", "0", "--vid", "1234", "--pid", "5678", "--hex", "00"]
+    )
+    assert payload["exit_code"] == 2
+    assert payload["error"]["code"] == "usage"
+    assert backend.calls == []
+
+
+def test_send_rejects_index_and_path_together(cli, monkeypatch) -> None:
+    backend = _install(monkeypatch, FakeBackend([_device()]))
+
+    payload = cli(
+        [
+            "hid",
+            "send",
+            "--index",
+            "0",
+            "--path-b64",
+            base64.b64encode(b"p1").decode("ascii"),
+            "--hex",
+            "00",
+        ]
     )
     assert payload["exit_code"] == 2
     assert payload["error"]["code"] == "usage"
@@ -561,12 +655,56 @@ def test_send_write_failure_is_device_unavailable(cli, monkeypatch) -> None:
     assert backend.handle.closed is True
 
 
+def test_send_negative_write_result_is_device_unavailable(cli, monkeypatch) -> None:
+    backend = _install(
+        monkeypatch, FakeBackend([_device(b"p1")], write_result=-1)
+    )
+
+    payload = cli(["hid", "send", "--index", "0", "--hex", "00"])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "device_unavailable"
+    assert backend.handle.writes == []
+    assert backend.calls[-1] == ("close",)
+    assert backend.handle.closed is True
+
+
+def test_send_open_failure_is_device_unavailable(cli, monkeypatch) -> None:
+    backend = _install(
+        monkeypatch, FakeBackend([_device(b"p1")], open_error=OSError("被占用"))
+    )
+
+    payload = cli(["hid", "send", "--index", "0", "--hex", "00"])
+    assert payload["exit_code"] == 3
+    assert payload["error"]["code"] == "device_unavailable"
+    assert "打开 HID 设备失败" in payload["error"]["message"]
+    assert "1234:5678" in payload["error"]["message"]
+    assert _count(backend, "write") == 0
+
+
+def test_send_close_failure_writes_stderr_only(capsys, monkeypatch) -> None:
+    backend = _install(
+        monkeypatch, FakeBackend([_device(b"p1")], close_error=OSError("关闭失败"))
+    )
+    from app.cli.main import run
+
+    code = run(["hid", "send", "--index", "0", "--hex", "00"])
+    captured = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload["ok"] is True
+    assert payload["data"]["report"] == "00" + "00" * 63
+    assert backend.handle.closed is True
+    assert captured.err.strip().count("\n") == 0
+    assert captured.err.strip().endswith("关闭 HID 设备失败：关闭失败")
+    assert "警告：" in captured.err
+
+
 # ---------------------------------------------------------------------------
 # monitor
 # ---------------------------------------------------------------------------
 
 
-def test_monitor_emits_start_data_end_and_summary(cli, monkeypatch) -> None:
+def test_monitor_emits_data_events_and_summary(cli, monkeypatch) -> None:
     clock = FakeClock()
     backend = _install(
         monkeypatch, FakeBackend([_device(b"p1")], chunks=[b"\x01"], clock=clock)
@@ -578,19 +716,13 @@ def test_monitor_emits_start_data_end_and_summary(cli, monkeypatch) -> None:
     assert payload["command"] == "hid.monitor"
 
     events = _events(payload)
-    assert [event.get("event") for event in events[:-1]] == ["start", "data", "end"]
-    start, data, end = events[0], events[1], events[2]
-    assert start["path_b64"] == base64.standard_b64encode(b"p1").decode("ascii")
-    assert start["vid"] == "1234"
-    assert start["pid"] == "5678"
-    assert start["report_length"] == 64
-    assert isinstance(start["at"], str)
+    assert [event.get("event") for event in events[:-1]] == ["data"]
+    data = events[0]
+    assert set(data) == {"event", "hex", "text", "size", "at"}
     assert data["hex"] == "01"
     assert data["text"] == "\x01"
     assert data["size"] == 1
     assert isinstance(data["at"], str)
-    assert end["bytes"] == 1
-    assert end["events"] == 1
 
     # 假时钟每轮推进 0.1 秒：1 秒窗口内正好 10 次 read。
     assert _count(backend, "read") == 10
@@ -603,9 +735,26 @@ def test_monitor_emits_start_data_end_and_summary(cli, monkeypatch) -> None:
         "duration_s": pytest.approx(1.0),
         "bytes": 1,
         "events": 1,
+        "report_length": 64,
     }
     assert backend.calls[-1] == ("close",)
     assert backend.handle.closed is True
+
+
+def test_monitor_read_timeout_shrinks_to_remaining(cli, monkeypatch) -> None:
+    clock = FakeClock(step=0.95)
+    backend = _install(monkeypatch, FakeBackend([_device(b"p1")], clock=clock))
+    _install_clock(monkeypatch, clock)
+
+    payload = cli(["hid", "monitor", "--index", "0", "--duration", "1"])
+    assert payload["exit_code"] == 0
+    reads = [call for call in backend.calls if call[0] == "read"]
+    # 第二轮只剩不足 100 ms，单次 read 的超时窗口随之收缩。
+    assert reads[0] == ("read", 64, 100)
+    assert 1 <= reads[1][2] <= 50
+    assert payload["data"]["bytes"] == 0
+    assert payload["data"]["events"] == 0
+    assert payload["data"]["report_length"] == 64
 
 
 def test_monitor_max_events_ends_early(cli, monkeypatch) -> None:
@@ -617,17 +766,18 @@ def test_monitor_max_events_ends_early(cli, monkeypatch) -> None:
     _install_clock(monkeypatch, clock)
 
     payload = cli(
-        ["hid", "monitor", "--index", "0", "--duration", "1", "--max-events", "2"]
+        ["hid", "monitor", "--index", "0", "--duration", "1", "--max-events", "1"]
     )
     assert payload["exit_code"] == 0
     assert payload["data"] == {
-        "duration_s": pytest.approx(0.2),
-        "bytes": 2,
-        "events": 2,
+        "duration_s": pytest.approx(0.1),
+        "bytes": 1,
+        "events": 1,
+        "report_length": 64,
     }
     events = _events(payload)
-    assert [event["hex"] for event in events[1:3]] == ["31", "32"]
-    assert _count(backend, "read") == 2
+    assert events[0]["hex"] == "31"
+    assert _count(backend, "read") == 1
     assert backend.handle.closed is True
 
 
@@ -640,19 +790,19 @@ def test_monitor_max_bytes_truncates_last_chunk(cli, monkeypatch) -> None:
     _install_clock(monkeypatch, clock)
 
     payload = cli(
-        ["hid", "monitor", "--index", "0", "--duration", "1", "--max-bytes", "5"]
+        ["hid", "monitor", "--index", "0", "--duration", "1", "--max-bytes", "1"]
     )
     assert payload["exit_code"] == 0
     assert payload["data"] == {
-        "duration_s": pytest.approx(0.2),
-        "bytes": 5,
-        "events": 2,
+        "duration_s": pytest.approx(0.1),
+        "bytes": 1,
+        "events": 1,
+        "report_length": 64,
     }
     events = _events(payload)
-    assert events[1]["hex"] == "41424344"
-    assert events[2]["hex"] == "45"
-    assert events[2]["size"] == 1
-    assert _count(backend, "read") == 2
+    assert events[0]["hex"] == "41"
+    assert events[0]["size"] == 1
+    assert _count(backend, "read") == 1
     assert backend.handle.closed is True
 
 
@@ -706,7 +856,7 @@ def test_monitor_rejects_invalid_report_length(cli, monkeypatch, extra) -> None:
     assert backend.calls == []
 
 
-def test_monitor_read_error_emits_error_event_and_exit_3(cli, monkeypatch) -> None:
+def test_monitor_read_error_exits_3_without_events(cli, monkeypatch) -> None:
     clock = FakeClock()
     backend = _install(
         monkeypatch,
@@ -719,11 +869,8 @@ def test_monitor_read_error_emits_error_event_and_exit_3(cli, monkeypatch) -> No
     assert payload["command"] == "hid.monitor"
     assert payload["error"]["code"] == "device_unavailable"
     assert "1234:5678" in payload["error"]["message"]
-
-    events = _events(payload)
-    assert [event.get("event") for event in events[:-1]] == ["start", "error"]
-    assert events[1]["code"] == "device_unavailable"
-    assert "1234:5678" in events[1]["message"]
+    # 监控只输出 data 事件，读写失败直接走错误信封。
+    assert "raw" not in payload
     assert backend.handle.closed is True
     assert backend.calls[-1] == ("close",)
 
@@ -741,6 +888,7 @@ def test_monitor_open_failure_has_no_events(cli, monkeypatch) -> None:
     payload = cli(["hid", "monitor", "--index", "0", "--duration", "1"])
     assert payload["exit_code"] == 3
     assert payload["error"]["code"] == "device_unavailable"
+    assert "打开 HID 设备失败" in payload["error"]["message"]
     assert "1234:5678" in payload["error"]["message"]
     assert emitted == []
     assert _count(backend, "read") == 0
