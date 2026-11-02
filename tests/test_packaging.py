@@ -46,6 +46,27 @@ def test_build_script_invokes_cli_directly_and_keeps_exit_code() -> None:
     assert "ConvertFrom-Json" in text
 
 
+def test_build_script_captures_cli_stderr() -> None:
+    """stderr 单独落到临时文件再读出：argparse 类失败只写 stderr，不能丢弃。
+
+    错误信息必须同时带命令/Label、退出码、stdout 与 stderr；成功路径仍只解析
+    stdout。丢弃 stderr 的写法（``2>$null``）不允许再出现。
+    """
+    text = _read(BUILD_SCRIPT_PATH)
+    assert "2>$null" not in text
+    assert "2> $StdErrPath" in text
+    assert "GetTempFileName" in text
+    assert "Get-Content -Raw -LiteralPath $StdErrPath" in text
+    assert "$stdErrText" in text
+    assert "$stdoutText" in text
+    assert "stderr: $stdErrText" in text
+    assert "stdout: $stdoutText" in text
+    assert "exit code $code" in text
+    assert "Remove-Item -LiteralPath $StdErrPath" in text
+    # 成功路径只把 stdout 交给 ConvertFrom-Json。
+    assert "$raw | ConvertFrom-Json" in text
+
+
 def test_build_script_verifies_cli() -> None:
     """三项 CLI 冒烟：version、checksum 与 convert base 的固定期望值。"""
     text = _read(BUILD_SCRIPT_PATH)

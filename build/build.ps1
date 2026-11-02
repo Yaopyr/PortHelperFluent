@@ -74,19 +74,33 @@ function Invoke-CliJson {
     # and error text match exactly what ran; every verification argument below
     # is a single whitespace-free token, hence the plain split.
     $arguments = @($Command -split '\s+')
+    # stderr is redirected to a temporary file instead of discarded: argument
+    # errors are reported on stderr only, and a swallowed stderr would leave the
+    # thrown message without any diagnostics.  Only stdout is parsed as JSON.
+    $StdErrPath = [System.IO.Path]::GetTempFileName()
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $raw = (& $Exe @arguments 2>$null) -join "`n"
+        $raw = (& $Exe @arguments 2> $StdErrPath) -join "`n"
         $code = $LASTEXITCODE
+        $stdErrRaw = if (Test-Path -LiteralPath $StdErrPath) {
+            Get-Content -Raw -LiteralPath $StdErrPath
+        } else { '' }
     }
     finally {
         $ErrorActionPreference = $previous
+        Remove-Item -LiteralPath $StdErrPath -Force -ErrorAction SilentlyContinue
     }
-    $detail = "$Label failed (command: $Command)"
-    if ($code -ne 0) { throw "$detail with exit code $code`: $raw" }
-    try { $payload = $raw | ConvertFrom-Json } catch { throw "${detail}: output was not JSON: $raw" }
-    if ($payload.ok -ne $true) { throw "${detail}: reported ok=false: $raw" }
+    $stdoutText = if ([string]::IsNullOrWhiteSpace($raw)) { '<empty>' } else { $raw.Trim() }
+    $stdErrText = if ([string]::IsNullOrWhiteSpace($stdErrRaw)) { '<empty>' } else { $stdErrRaw.Trim() }
+    $detail = "$Label (command: $Command, exit code $code); stdout: $stdoutText; stderr: $stdErrText"
+    if ($code -ne 0) { throw "CLI failed: $detail" }
+    try {
+        $payload = $raw | ConvertFrom-Json
+    } catch {
+        throw "CLI did not return JSON: $detail"
+    }
+    if ($payload.ok -ne $true) { throw "CLI reported ok=false: $detail" }
     return $payload
 }
 
