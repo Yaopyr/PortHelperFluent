@@ -37,6 +37,10 @@ _MAX_REPORT_LENGTH = 1024
 _MAX_REPORT_ID = 255
 _MAX_ID = 0xFFFF
 
+# 空块后的短暂让步：真实 hidapi 的 read 会阻塞，但后端若立即返回空块，
+# 这个停顿可避免监控循环空转；上限仅数毫秒，且不越过 --duration。
+EMPTY_READ_PAUSE = 0.005
+
 
 def register(subparsers) -> None:
     """注册 ``hid`` 命令组（不带处理器的中间层解析器）。"""
@@ -287,9 +291,10 @@ def run_send(args) -> dict[str, Any]:
 def _register_monitor(subparsers) -> None:
     parser = subparsers.add_parser(
         "monitor",
-        help="持续读取 HID 输入报告，按 NDJSON 输出事件（有界，固定 NDJSON）。",
-        description="打开设备后循环读取，逐行输出 start/data/end 事件；必须用 --duration "
-        "限定运行时长，可用 --max-bytes/--max-events 提前结束。输出固定为 NDJSON，"
+        help="持续读取 HID 输入报告，逐行输出 data 事件并返回汇总（有界，固定 NDJSON）。",
+        description="打开设备后循环读取，只逐行输出 data 事件，结束时返回时长/字节/"
+        "事件数/报告长度汇总；必须用 --duration 限定运行时长，可用 "
+        "--max-bytes/--max-events 提前结束。输出固定为 NDJSON，"
         "--format text、--pretty 与 --until/--until-hex 都视为参数错误（退出码 2）。",
     )
     _add_device_options(parser)
@@ -355,6 +360,9 @@ def run_monitor(args) -> dict[str, Any]:
                 if len(chunk) > budget:
                     chunk = chunk[:budget]
             if not chunk:
+                pause = min(EMPTY_READ_PAUSE, deadline - hid_io._clock())
+                if pause > 0:
+                    time.sleep(pause)
                 continue
 
             total += len(chunk)
