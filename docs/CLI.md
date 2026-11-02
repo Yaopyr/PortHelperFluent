@@ -74,7 +74,8 @@ PortHelperFluent.exe <group> <action> --help
 - `serial monitor`、`ble notify` 另支持 `--until TEXT` / `--until-hex HEX`，命中即结束；`net server` 与 `net udp --listen-only` 不接受 `--until`（退出码 2）。
 - 最后一行是标准信封（成功或失败），Agent 以最后一行为准。
 - 固定输出 NDJSON：`--format text` 与 `--pretty` 视为参数错误（退出码 2）。
-- 运行中失败（设备拔出、连接断开等）先输出一行 `{"event":"error",...}`，再输出标准错误信封并以退出码 3 结束；启动即失败则只输出错误信封。
+- `serial monitor`、`hid monitor`、`ble notify`、`net server` 运行中失败（设备拔出、连接断开等）先输出一行 `{"event":"error",...}`，再输出标准错误信封并以退出码 3 结束；启动或打开即失败则只输出错误信封。
+- `net udp --listen-only` 是扩展流式模式：运行中失败直接输出标准错误信封，不额外发 `error` 事件。
 
 ## 命令总表
 
@@ -209,7 +210,7 @@ TCP/UDP 用标准库 `socket`，不依赖 QtNetwork。
 
 ## Agent 示例
 
-以下命令可直接在 Windows PowerShell 中复制执行；把 `python main.py` 换成 `PortHelperFluent.exe` 即为打包后的用法。
+以下命令可直接在 Windows PowerShell 中复制执行；把 `python main.py` 换成 `PortHelperFluent.exe` 即为打包后的用法。示例 2 需要 `.\assets` 是包含图片的文件夹（可换成任意图片目录）；示例 3 需要真实 `COM3` 端口与设备（按实际端口修改）；示例 4 需要先启动服务端，再在另一个终端运行客户端。
 
 **1. 校验已知向量（期望 `CBF43926`）**
 
@@ -232,8 +233,8 @@ python main.py serial send --port COM3 --baud 115200 --text AT --line-ending crl
 **4. TCP 回环收发（先开服务端，再运行客户端）**
 
 ```powershell
-# 终端 A：有界回显服务端，5 秒后自动结束
-python main.py net server --bind 127.0.0.1 --port 18765 --echo --duration 5
+# 终端 A：有界应答服务端，对每次收到的数据回发 PONG，5 秒后自动结束
+python main.py net server --bind 127.0.0.1 --port 18765 --reply PONG --duration 5
 
 # 终端 B：发送 PING 并等待 PONG
 python main.py net tcp --host 127.0.0.1 --port 18765 --text PING --expect PONG --timeout 3
